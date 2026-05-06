@@ -167,9 +167,11 @@ def quantize(
             :meth:`calibrate <modelopt.torch.quantization.model_quant.calibrate>`.
 
             Each entry in the ``"quant_cfg"`` list has a ``"quantizer_name"`` wildcard matched
-            against quantizer module names, an optional ``"cfg"`` dict of quantizer attributes,
-            and an optional ``"enable"`` toggle. Entries are applied in list order; later entries
-            override earlier ones. The quantizer modules have names ending with
+            against quantizer module names, an optional ``"cfg"``
+            :class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>`
+            (or equivalent backward-compatible dict input), and an optional ``"enable"`` toggle.
+            Entries are applied in list order; later entries override earlier ones. The quantizer
+            modules have names ending with
             ``weight_quantizer`` and ``input_quantizer`` and they perform weight quantization and
             input quantization (or activation quantization) respectively. The quantizer modules
             are instances of

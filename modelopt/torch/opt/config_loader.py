@@ -33,11 +33,25 @@ except ImportError:  # Python < 3.11
 import re
 import sys
 from pathlib import Path
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+    overload,
+)
 
 import yaml
 from pydantic import TypeAdapter
 from typing_extensions import NotRequired, Required, is_typeddict
+
+if TYPE_CHECKING:
+    from modelopt.torch.opt.config import ModeloptBaseConfig
+
+_ModeloptConfigT = TypeVar("_ModeloptConfigT", bound="ModeloptBaseConfig")
 
 
 @dataclass
@@ -47,7 +61,7 @@ class _ListSnippet:
     YAML requires one root node per document, so a file that is "a list with an
     ``imports`` section" has to use two documents separated by ``---``. This
     wrapper is the internal transport carrying both pieces from
-    :func:`_load_raw_config` to :func:`_resolve_imports` without smuggling them
+    :func:`_load_raw_config_with_schema` to :func:`_resolve_imports` without smuggling them
     through a sentinel dict key (which would collide if a user happened to
     choose the same key name).
     """
@@ -113,7 +127,7 @@ def _resolve_config_path(config_file: str | Path | Traversable) -> Path | Traver
     built-in package resources return a ``Traversable``. Raises ``ValueError``
     if no candidate exists.
 
-    Factored out of :func:`_load_raw_config` so :func:`_resolve_imports` can
+    Factored out of :func:`_load_raw_config_with_schema` so :func:`_resolve_imports` can
     compute a canonical cycle-detection key without reading the file twice.
     """
     # Probe order: filesystem first, then built-in library.
@@ -243,13 +257,6 @@ def _load_raw_config_with_schema(config_file: str | Path | Traversable) -> _RawC
     )
 
 
-def _load_raw_config(
-    config_file: str | Path | Traversable,
-) -> dict[str, Any] | list[Any] | _ListSnippet:
-    """Load a config YAML without resolving ``$import`` references."""
-    return _load_raw_config_with_schema(config_file).data
-
-
 _IMPORT_KEY = "$import"
 
 
@@ -373,10 +380,10 @@ def _validate_modelopt_schema(
     data: Any,
     config_path: Any,
     schema_type: Any | None = None,
-) -> None:
-    """Validate resolved config content against the requested schema without mutating it."""
+) -> Any:
+    """Validate resolved config content and return the Pydantic-normalized value."""
     if schema_type is None and not schema_path:
-        return
+        return data
     if schema_type is None:
         assert schema_path is not None
         schema_type = _schema_type(schema_path)
@@ -384,7 +391,7 @@ def _validate_modelopt_schema(
         # TypeAdapter validates the schema types we allow here: BaseModel classes
         # plus regular typing constructs such as TypedDict, list[TypedDict], unions,
         # and aliases. Schema comments are not treated as arbitrary validators.
-        TypeAdapter(schema_type).validate_python(data)
+        return TypeAdapter(schema_type).validate_python(data)
     except Exception as exc:
         raise ValueError(
             f"Config file {config_path} does not match modelopt-schema "
@@ -592,22 +599,52 @@ def _find_import_marker(obj: Any, context: str = "root") -> tuple[Any, str] | No
     return None
 
 
+# Concrete ModeloptBaseConfig subclasses are returned as that exact parsed type.
+@overload
 def load_config(
     config_path: str | Path | Traversable,
     *,
-    schema_type: Any | None = None,
-) -> dict[str, Any] | list[Any]:
+    schema_type: type[_ModeloptConfigT],
+) -> _ModeloptConfigT: ...
+
+
+# Typed list schemas, such as list[SomeModeloptConfig], validate each element
+# and return a list of parsed config objects.
+@overload
+def load_config(
+    config_path: str | Path | Traversable,
+    *,
+    schema_type: type[list[_ModeloptConfigT]],
+) -> list[_ModeloptConfigT]: ...
+
+
+# Without an explicit schema_type, untyped files return raw dict/list payloads;
+# files with modelopt-schema comments still return the validated schema value.
+@overload
+def load_config(
+    config_path: str | Path | Traversable,
+    *,
+    schema_type: None = None,
+) -> "ModeloptBaseConfig | dict[str, Any] | list[Any]": ...
+
+
+def load_config(
+    config_path: str | Path | Traversable,
+    *,
+    schema_type: object | None = None,
+) -> "ModeloptBaseConfig | dict[str, Any] | list[Any]":
     """Load a YAML config and resolve all ``$import`` references.
 
     This is the primary config loading entry point.  It loads the YAML file,
     resolves any ``imports`` / ``$import`` directives, and returns the final
-    config dict or list.
+    config.
 
     ``schema_type`` supplies a typing context for import resolution when the
-    file itself has no ``modelopt-schema`` comment. It is intentionally not a
-    request to validate the top-level file. Top-level files are validated only
-    when they declare ``modelopt-schema``; imported snippets are stricter and
-    must always declare ``modelopt-schema``.
+    file itself has no ``modelopt-schema`` comment. If either ``schema_type``
+    or a ``modelopt-schema`` comment is present, the resolved top-level payload
+    is returned as the Pydantic-normalized value for that schema. Untyped files
+    return the resolved dict or list. Imported snippets are stricter and must
+    always declare ``modelopt-schema``.
     """
     raw = _load_raw_config_with_schema(config_path)
     data = raw.data
@@ -616,5 +653,8 @@ def load_config(
 
     if isinstance(data, (_ListSnippet, dict)):
         data = _resolve_imports(data, schema_type=resolver_schema_type)
-    _validate_modelopt_schema(raw.schema, data, raw.path, schema_type=declared_schema_type)
+    if declared_schema_type is not None or schema_type is not None:
+        return _validate_modelopt_schema(
+            raw.schema, data, raw.path, schema_type=declared_schema_type or schema_type
+        )
     return data

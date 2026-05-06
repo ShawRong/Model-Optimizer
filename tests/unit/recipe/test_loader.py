@@ -19,8 +19,9 @@ import re
 
 import pytest
 
-from modelopt.recipe.config import ModelOptPTQRecipe, RecipeType
+from modelopt.recipe.config import ModelOptPTQRecipe, RecipeMetadataConfig, RecipeType
 from modelopt.recipe.loader import load_config, load_recipe
+from modelopt.torch.quantization.config import QuantizeConfig, QuantizerAttributeConfig
 
 # ---------------------------------------------------------------------------
 # Static YAML fixtures
@@ -75,6 +76,14 @@ def _write_quantizer_cfg_list(path, body: str):
     path.write_text(QUANTIZER_CFG_LIST_SCHEMA + body)
 
 
+def _cfg_to_dict(cfg):
+    if isinstance(cfg, QuantizerAttributeConfig):
+        return cfg.model_dump(exclude_unset=True)
+    if isinstance(cfg, list):
+        return [_cfg_to_dict(item) for item in cfg]
+    return cfg
+
+
 # ---------------------------------------------------------------------------
 # Directory-format YAML fixtures
 # ---------------------------------------------------------------------------
@@ -94,6 +103,32 @@ def test_load_config_suffix_probe(tmp_path):
     """load_config finds a .yml file when suffix is omitted from a string path."""
     (tmp_path / "mycfg.yml").write_text(CFG_KEY_VAL)
     assert load_config(str(tmp_path / "mycfg")) == {"key": "val"}
+
+
+def test_load_config_schema_type_returns_validated_type(tmp_path):
+    """schema_type validates and returns the parsed schema value."""
+    cfg_file = tmp_path / "quantize.yml"
+    cfg_file.write_text(
+        "algorithm: max\n"
+        "quant_cfg:\n"
+        "  - quantizer_name: '*weight_quantizer'\n"
+        "    cfg:\n"
+        "      num_bits: 8\n"
+        "      axis: 0\n"
+    )
+    data = load_config(cfg_file, schema_type=QuantizeConfig)
+    assert isinstance(data, QuantizeConfig)
+    assert _cfg_to_dict(data.quant_cfg[0]["cfg"]) == {"num_bits": 8, "axis": 0}
+
+
+def test_load_config_recipe_metadata_returns_validated_type(tmp_path):
+    """Recipe metadata schema validates and returns the parsed metadata model."""
+    cfg_file = tmp_path / "metadata.yml"
+    cfg_file.write_text("recipe_type: ptq\n")
+    data = load_config(cfg_file, schema_type=RecipeMetadataConfig)
+    assert isinstance(data, RecipeMetadataConfig)
+    assert data.recipe_type == RecipeType.PTQ
+    assert data.description == "Model optimization recipe."
 
 
 def test_load_config_missing_file_raises(tmp_path):
@@ -248,6 +283,7 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
         YAML always uses the string form.  Both are converted to ``[E, M]`` so the
         comparison is representation-agnostic.
         """
+        val = _cfg_to_dict(val)
         if isinstance(val, str):
             m = re.fullmatch(r"e(\d+)m(\d+)", val)
             if m:
@@ -256,6 +292,8 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
             return list(val)
         if isinstance(val, dict):
             return {str(k): _normalize_fpx(v) for k, v in val.items()}
+        if isinstance(val, list):
+            return [_normalize_fpx(v) for v in val]
         return val
 
     def _normalize_entries(raw_entries):
@@ -302,7 +340,7 @@ def test_import_resolves_cfg_reference(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     entry = recipe.quantize["quant_cfg"][0]
-    assert entry["cfg"] == {"num_bits": (4, 3), "axis": None}
+    assert _cfg_to_dict(entry["cfg"]) == {"num_bits": (4, 3), "axis": None}
 
 
 def test_import_same_name_used_twice(tmp_path):
@@ -325,7 +363,9 @@ def test_import_same_name_used_twice(tmp_path):
         f"        $import: fp8\n"
     )
     recipe = load_recipe(recipe_file)
-    assert recipe.quantize["quant_cfg"][0]["cfg"] == recipe.quantize["quant_cfg"][1]["cfg"]
+    assert _cfg_to_dict(recipe.quantize["quant_cfg"][0]["cfg"]) == _cfg_to_dict(
+        recipe.quantize["quant_cfg"][1]["cfg"]
+    )
 
 
 def test_import_multiple_snippets(tmp_path):
@@ -375,7 +415,7 @@ def test_import_inline_cfg_not_affected(tmp_path):
         f"        axis: 0\n"
     )
     recipe = load_recipe(recipe_file)
-    assert recipe.quantize["quant_cfg"][1]["cfg"] == {"num_bits": 8, "axis": 0}
+    assert _cfg_to_dict(recipe.quantize["quant_cfg"][1]["cfg"]) == {"num_bits": 8, "axis": 0}
 
 
 def test_import_unknown_reference_raises(tmp_path):
@@ -596,7 +636,7 @@ def test_import_cfg_extend(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3), "axis": 0}
+    assert _cfg_to_dict(cfg) == {"num_bits": (4, 3), "axis": 0}
 
 
 def test_import_cfg_inline_overrides_import(tmp_path):
@@ -659,7 +699,7 @@ def test_import_in_multiple_dict_values(tmp_path):
     )
     data = load_config(config_file)
     entry = data["quant_cfg"][0]
-    assert entry["cfg"] == {"num_bits": (4, 3)}
+    assert _cfg_to_dict(entry["cfg"]) == {"num_bits": (4, 3)}
     assert entry["my_field"] == {"fake_quant": False}
 
 
@@ -683,7 +723,7 @@ def test_import_cfg_multi_import(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3), "axis": 0}
+    assert _cfg_to_dict(cfg) == {"num_bits": (4, 3), "axis": 0}
 
 
 def test_import_cfg_multi_import_later_overrides_earlier(tmp_path):
@@ -732,7 +772,7 @@ def test_import_cfg_multi_import_with_extend(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3), "fake_quant": False, "axis": 0}
+    assert _cfg_to_dict(cfg) == {"num_bits": (4, 3), "fake_quant": False, "axis": 0}
 
 
 def test_import_dir_format(tmp_path):
@@ -749,7 +789,10 @@ def test_import_dir_format(tmp_path):
         "      $import: fp8\n"
     )
     recipe = load_recipe(tmp_path)
-    assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3), "axis": None}
+    assert _cfg_to_dict(recipe.quantize["quant_cfg"][0]["cfg"]) == {
+        "num_bits": (4, 3),
+        "axis": None,
+    }
 
 
 def test_import_dir_format_metadata_imports_do_not_apply_to_quantize(tmp_path):
@@ -803,7 +846,7 @@ def test_import_multi_document_list_snippet(tmp_path):
     recipe = load_recipe(recipe_file)
     assert len(recipe.quantize["quant_cfg"]) == 1
     assert recipe.quantize["quant_cfg"][0]["quantizer_name"] == "*[kv]_bmm_quantizer"
-    assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
+    assert _cfg_to_dict(recipe.quantize["quant_cfg"][0]["cfg"]) == {"num_bits": (4, 3)}
 
 
 def test_import_builtin_kv_fp8_snippet():
@@ -914,9 +957,9 @@ def test_import_mixed_tree(tmp_path):
     )
     data = load_config(config_file)
     # Dict import inside list entry
-    assert data["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
+    assert _cfg_to_dict(data["quant_cfg"][0]["cfg"]) == {"num_bits": (4, 3)}
     # List splice
-    assert data["quant_cfg"][1] == {"quantizer_name": "*lm_head*", "enable": False}
+    assert data["quant_cfg"][1] == {"quantizer_name": "*lm_head*", "enable": False, "cfg": None}
 
 
 # ---------------------------------------------------------------------------
@@ -955,7 +998,7 @@ def test_import_recursive(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     cfg = recipe.quantize["quant_cfg"][0]["cfg"]
-    assert cfg == {"num_bits": (4, 3)}
+    assert _cfg_to_dict(cfg) == {"num_bits": (4, 3)}
 
 
 def test_import_circular_raises(tmp_path):
@@ -1055,9 +1098,12 @@ def test_import_cross_file_same_name_no_conflict(tmp_path):
     )
     recipe = load_recipe(recipe_file)
     # Parent's "fmt" resolves to fp8 (e4m3), not child's nvfp4.
-    assert recipe.quantize["quant_cfg"][0]["cfg"] == {"num_bits": (4, 3)}
+    assert _cfg_to_dict(recipe.quantize["quant_cfg"][0]["cfg"]) == {"num_bits": (4, 3)}
     # Child's "fmt" resolves to nvfp4 (e2m1), not parent's fp8.
-    assert recipe.quantize["quant_cfg"][1]["cfg"] == {"num_bits": (2, 1), "axis": 0}
+    assert _cfg_to_dict(recipe.quantize["quant_cfg"][1]["cfg"]) == {
+        "num_bits": (2, 1),
+        "axis": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1088,8 +1134,8 @@ def test_builtin_config_snippets_with_modelopt_schema(config_path):
     assert data
 
 
-def test_modelopt_schema_comment_validates_without_changing_payload(tmp_path):
-    """modelopt-schema validates the resolved payload but load_config still returns a plain dict."""
+def test_modelopt_schema_comment_returns_validated_type(tmp_path):
+    """modelopt-schema validates and returns the parsed schema value."""
     config_file = tmp_path / "fp8.yaml"
     config_file.write_text(
         "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
@@ -1097,7 +1143,8 @@ def test_modelopt_schema_comment_validates_without_changing_payload(tmp_path):
         "axis:\n"
     )
     data = load_config(config_file)
-    assert data == {"num_bits": (4, 3), "axis": None}
+    assert isinstance(data, QuantizerAttributeConfig)
+    assert data.model_dump(exclude_unset=True) == {"num_bits": (4, 3), "axis": None}
 
 
 def test_modelopt_schema_comment_validation_error(tmp_path):
@@ -1144,11 +1191,12 @@ def test_modelopt_schema_comment_validates_after_import_resolution(tmp_path):
         f"    $import: fp8\n"
     )
     data = load_config(config_file)
-    assert data == [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": (4, 3)}}]
+    assert data[0]["quantizer_name"] == "*weight_quantizer"
+    assert _cfg_to_dict(data[0]["cfg"]) == {"num_bits": (4, 3)}
 
 
 # ---------------------------------------------------------------------------
-# Coverage: _load_raw_config edge cases
+# Coverage: _load_raw_config_with_schema edge cases
 # ---------------------------------------------------------------------------
 
 
@@ -1188,9 +1236,9 @@ def test_load_config_multi_doc_dict_dict(tmp_path):
     """Multi-document YAML with two dicts merges them."""
     cfg_file = tmp_path / "multi.yaml"
     cfg_file.write_text("imports:\n  fp8: some/path\n---\nalgorithm: max\n")
-    from modelopt.torch.opt.config_loader import _load_raw_config
+    from modelopt.torch.opt.config_loader import _load_raw_config_with_schema
 
-    data = _load_raw_config(cfg_file)
+    data = _load_raw_config_with_schema(cfg_file).data
     assert data["imports"] == {"fp8": "some/path"}
     assert data["algorithm"] == "max"
 
@@ -1199,9 +1247,9 @@ def test_load_config_multi_doc_null_content(tmp_path):
     """Multi-document YAML where second doc is null treats content as empty dict."""
     cfg_file = tmp_path / "multi_null.yaml"
     cfg_file.write_text("key: value\n---\n")
-    from modelopt.torch.opt.config_loader import _load_raw_config
+    from modelopt.torch.opt.config_loader import _load_raw_config_with_schema
 
-    data = _load_raw_config(cfg_file)
+    data = _load_raw_config_with_schema(cfg_file).data
     assert data == {"key": "value"}
 
 
@@ -1249,7 +1297,8 @@ def test_load_config_list_valued_yaml(tmp_path):
     data = load_config(cfg_file)
     assert isinstance(data, list)
     assert len(data) == 2
-    assert data[0] == {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}
+    assert data[0]["quantizer_name"] == "*weight_quantizer"
+    assert _cfg_to_dict(data[0]["cfg"]) == {"num_bits": 8}
 
 
 # ---------------------------------------------------------------------------

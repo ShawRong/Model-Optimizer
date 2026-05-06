@@ -26,6 +26,7 @@ from modelopt.torch.quantization.config import (
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
     QuantizeConfig,
+    QuantizerAttributeConfig,
     find_quant_cfg_entry_by_path,
     need_calibration,
     normalize_quant_cfg_list,
@@ -525,3 +526,44 @@ class TestQuantizeConfigValidators:
             algorithm="max",
         )
         assert len(cfg.quant_cfg) == 2
+
+    def test_quant_cfg_parses_dict_cfg_to_pydantic_type(self):
+        """Python dict cfg input is accepted and parsed to QuantizerAttributeConfig."""
+        cfg = QuantizeConfig(
+            quant_cfg=[
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            ],
+            algorithm="max",
+        )
+        attr_cfg = cfg.quant_cfg[0]["cfg"]
+        assert isinstance(attr_cfg, QuantizerAttributeConfig)
+        assert attr_cfg.model_dump(exclude_unset=True) == {"num_bits": 8, "axis": 0}
+
+    def test_quant_cfg_parses_list_of_dict_cfg_to_pydantic_type(self):
+        """Python list-of-dict cfg input is accepted and parsed to QuantizerAttributeConfig."""
+        cfg = QuantizeConfig(
+            quant_cfg=[
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": [
+                        {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                        {"num_bits": 8, "axis": 0},
+                    ],
+                },
+            ],
+            algorithm="max",
+        )
+        attr_cfgs = cfg.quant_cfg[0]["cfg"]
+        assert isinstance(attr_cfgs, list)
+        assert all(isinstance(attr_cfg, QuantizerAttributeConfig) for attr_cfg in attr_cfgs)
+        assert attr_cfgs[0].num_bits == 4
+        assert attr_cfgs[1].axis == 0
+
+    def test_quant_cfg_accepts_pydantic_cfg_instances(self):
+        """Already-parsed QuantizerAttributeConfig input remains valid."""
+        attr_cfg = QuantizerAttributeConfig(num_bits=8, axis=0)
+        cfg = QuantizeConfig(
+            quant_cfg=[{"quantizer_name": "*weight_quantizer", "cfg": attr_cfg}],
+            algorithm="max",
+        )
+        assert cfg.quant_cfg[0]["cfg"] == attr_cfg

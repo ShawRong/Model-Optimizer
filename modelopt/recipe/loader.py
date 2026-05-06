@@ -22,7 +22,7 @@ except ImportError:  # Python < 3.11
 from pathlib import Path
 
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT as BUILTIN_RECIPES_LIB
-from modelopt.torch.opt.config_loader import load_config
+from modelopt.torch.opt.config_loader import _load_raw_config_with_schema, load_config
 from modelopt.torch.quantization.config import QuantizeConfig
 
 from .config import ModelOptPTQRecipe, ModelOptRecipeBase, RecipeMetadataConfig, RecipeType
@@ -89,13 +89,13 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
     The file must contain a ``metadata`` section with at least ``recipe_type``,
     plus a ``quant_cfg`` mapping and an optional ``algorithm`` for PTQ recipes.
     """
-    data = load_config(recipe_file, schema_type=ModelOptPTQRecipe)
-    if not isinstance(data, dict):
+    raw_data = _load_raw_config_with_schema(recipe_file).data
+    if not isinstance(raw_data, dict):
         raise ValueError(
-            f"Recipe file {recipe_file} must be a YAML mapping, got {type(data).__name__}."
+            f"Recipe file {recipe_file} must be a YAML mapping, got {type(raw_data).__name__}."
         )
 
-    metadata = data.get("metadata", {})
+    metadata = raw_data.get("metadata", {})
     if not isinstance(metadata, dict):
         raise ValueError(
             f"Recipe file {recipe_file} field 'metadata' must be a mapping, "
@@ -106,12 +106,9 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
         raise ValueError(f"Recipe file {recipe_file} must contain a 'metadata.recipe_type' field.")
 
     if recipe_type == RecipeType.PTQ:
-        if "quantize" not in data:
+        if "quantize" not in raw_data:
             raise ValueError(f"PTQ recipe file {recipe_file} must contain 'quantize'.")
-        return ModelOptPTQRecipe(
-            metadata=metadata,
-            quantize=data["quantize"],
-        )
+        return load_config(recipe_file, schema_type=ModelOptPTQRecipe)
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")
 
 
@@ -139,21 +136,11 @@ def _load_recipe_from_dir(recipe_dir: Path | Traversable) -> ModelOptRecipeBase:
     metadata_file = _find_recipe_section_file(recipe_dir, "metadata")
 
     metadata = load_config(metadata_file, schema_type=RecipeMetadataConfig)
-    if not isinstance(metadata, dict):
-        raise ValueError(
-            f"Metadata file {metadata_file} must be a YAML mapping, got {type(metadata).__name__}."
-        )
-    recipe_type = metadata.get("recipe_type")
-    if recipe_type is None:
-        raise ValueError(f"Metadata file {metadata_file} must contain a 'recipe_type' field.")
+    recipe_type = metadata.recipe_type
 
     if recipe_type == RecipeType.PTQ:
         quantize_file = _find_recipe_section_file(recipe_dir, "quantize")
         quantize_data = load_config(quantize_file, schema_type=QuantizeConfig)
-        if not isinstance(quantize_data, dict):
-            raise ValueError(
-                f"{quantize_file} must be a YAML mapping, got {type(quantize_data).__name__}."
-            )
         return ModelOptPTQRecipe(
             metadata=metadata,
             quantize=quantize_data,

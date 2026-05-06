@@ -31,7 +31,7 @@ from modelopt.torch.utils import get_unwrapped_name
 
 from .config import (
     QuantizeConfig,
-    QuantizeQuantCfgType,
+    QuantizeQuantCfgInputType,
     QuantizerAttributeConfig,
     _QuantizeExportConfig,
     normalize_quant_cfg_list,
@@ -215,7 +215,7 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
         _replace_quant_module(getattr(model, name), version=version, registry=registry)
 
 
-def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
+def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgInputType):
     """Apply a quantization config list to the quantizers in ``quant_model``.
 
     ``quant_cfg`` is an **ordered list** of :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>`
@@ -223,8 +223,9 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
 
     - ``quantizer_name`` *(required)*: wildcard matched against quantizer module names via
       :func:`fnmatch`.
-    - ``cfg`` *(optional)*: a dict of :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`
-      fields, or a list of such dicts for sequential quantization.
+    - ``cfg`` *(optional)*: a :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`
+      or a list of them for sequential quantization. Equivalent dict and list-of-dict inputs are
+      accepted for backward compatibility.
     - ``enable`` *(optional)*: ``True`` or ``False`` to toggle matched quantizers on or off.
       When omitted but ``cfg`` is present, defaults to ``True``.  Every entry must specify at
       least one of ``cfg`` or ``enable`` — an entry with only ``quantizer_name`` is invalid.
@@ -248,7 +249,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
 
     See :ref:`quant-cfg` for the full format reference and common patterns.
     """
-    quant_cfg = normalize_quant_cfg_list(quant_cfg)
+    quant_cfg = normalize_quant_cfg_list(list(quant_cfg))
 
     for entry in quant_cfg:
         quantizer_name: str = entry["quantizer_name"]
@@ -277,13 +278,23 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
                 attributes = cfg.model_copy(update={"enable": enable})
             elif isinstance(cfg, dict):
                 attributes = QuantizerAttributeConfig(**cfg, enable=enable)
+            elif isinstance(cfg, list):
+                attributes = []
+                for c in cfg:
+                    if isinstance(c, QuantizerAttributeConfig):
+                        attributes.append(c.model_copy(update={"enable": enable}))
+                    elif isinstance(c, dict):
+                        attributes.append(QuantizerAttributeConfig(**c, enable=enable))
+                    else:
+                        raise ValueError(
+                            f"Invalid cfg element for quantizer {quantizer_name!r}: expected "
+                            "QuantizerAttributeConfig or dict."
+                        )
             else:
-                attributes = [
-                    c.model_copy(update={"enable": enable})
-                    if isinstance(c, QuantizerAttributeConfig)
-                    else QuantizerAttributeConfig(**c, enable=enable)
-                    for c in cfg
-                ]
+                raise ValueError(
+                    f"Invalid cfg for quantizer {quantizer_name!r}: expected "
+                    "QuantizerAttributeConfig, dict, or list."
+                )
             set_quantizer_attributes_full(quant_model, quantizer_name, attributes, parent_class)
 
 
@@ -477,7 +488,7 @@ def set_quantizer_attributes_partial(
 
 
 @contextmanager
-def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
+def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgInputType):
     """Context manager that temporarily applies a quantization config and restores the original state on exit.
 
     Calls :func:`set_quantizer_by_cfg` on entry and reverts every
@@ -497,7 +508,7 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuan
     Yields:
         None — the context body runs with the new quantizer attributes active.
     """
-    quant_cfg = normalize_quant_cfg_list(quant_cfg)
+    quant_cfg = normalize_quant_cfg_list(list(quant_cfg))
 
     for entry in quant_cfg:
         if isinstance(entry.get("cfg"), list):

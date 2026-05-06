@@ -71,8 +71,10 @@ Each entry in the ``quant_cfg`` list is a :class:`QuantizerCfgEntry` with the fo
 - ``parent_class`` *(optional)*: restricts matching to quantizers whose immediate parent module is
   of this PyTorch class (e.g. ``"nn.Linear"``). If omitted, all matching quantizers are targeted
   regardless of their parent class.
-- ``cfg`` *(optional)*: a dict of quantizer attributes as defined by
-  :class:`QuantizerAttributeConfig`, or a list of such dicts. When a list is given, the matched
+- ``cfg`` *(optional)*: a :class:`QuantizerAttributeConfig`, or a list of
+  :class:`QuantizerAttributeConfig` objects. Equivalent dict and list-of-dict inputs are accepted
+  for backward compatibility, but are deprecated weakly schematized forms. When a list is given,
+  the matched
   :class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer>`
   is replaced with a
   :class:`SequentialQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer>`
@@ -152,6 +154,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 import copy
 import warnings
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
 from pydantic import ValidationInfo, field_validator, model_validator
@@ -160,49 +163,6 @@ from typing_extensions import Required, TypedDict
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.utils.network import ConstructorLike
-
-
-class QuantizerCfgEntry(TypedDict, total=False):
-    """A single entry in a ``quant_cfg`` list."""
-
-    quantizer_name: Required[str]  # matched against quantizer module names
-    parent_class: str | None  # optional; filters by pytorch module class name (e.g. "nn.Linear")
-    cfg: dict[str, Any] | list[dict[str, Any]] | None  # quantizer attribute config(s)
-    enable: bool | None  # toggles matched quantizers on/off; independent of cfg
-
-
-def find_quant_cfg_entry_by_path(
-    quant_cfg_list: list[QuantizerCfgEntry], quantizer_name: str
-) -> QuantizerCfgEntry:
-    """Find the last entry in a ``quant_cfg`` list whose ``quantizer_name`` key equals the query.
-
-    This performs an **exact string comparison** against the ``quantizer_name`` field of each
-    entry — it does *not* apply ``fnmatch`` pattern matching.  For example, passing
-    ``"*input_quantizer"`` will only match entries whose ``quantizer_name`` is literally
-    ``"*input_quantizer"``, not entries with a different wildcard that would match the same
-    module names at apply time.
-
-    Returns the *last* match because entries are applied in list order and later entries
-    override earlier ones, so the last match represents the effective configuration.
-
-    Args:
-        quant_cfg_list: A list of :class:`QuantizerCfgEntry` dicts.
-        quantizer_name: The exact ``quantizer_name`` string to search for.
-
-    Returns:
-        The last entry whose ``quantizer_name`` equals *quantizer_name*.
-
-    Raises:
-        KeyError: If no entry with the given ``quantizer_name`` is found.
-    """
-    result = None
-    for entry in quant_cfg_list:
-        if isinstance(entry, dict) and entry.get("quantizer_name") == quantizer_name:
-            result = entry
-    if result is None:
-        raise KeyError(f"No quant_cfg entry with quantizer_name={quantizer_name!r}")
-    return result
-
 
 BiasType = Literal["static", "dynamic"]
 BiasMethod = Literal["mean", "max_min"]
@@ -561,6 +521,48 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         math for both FP8 and NVFP4 quantization, so the amax is hardcoded to the FP8 range.
         """,
     )
+
+
+class QuantizerCfgEntry(TypedDict, total=False):
+    """A single entry in a ``quant_cfg`` list."""
+
+    quantizer_name: Required[str]  # matched against quantizer module names
+    parent_class: str | None  # optional; filters by pytorch module class name (e.g. "nn.Linear")
+    cfg: QuantizerAttributeConfig | list[QuantizerAttributeConfig] | None
+    enable: bool | None  # toggles matched quantizers on/off; independent of cfg
+
+
+def find_quant_cfg_entry_by_path(
+    quant_cfg_list: Sequence[Any], quantizer_name: str
+) -> dict[str, Any]:
+    """Find the last entry in a ``quant_cfg`` list whose ``quantizer_name`` key equals the query.
+
+    This performs an **exact string comparison** against the ``quantizer_name`` field of each
+    entry — it does *not* apply ``fnmatch`` pattern matching.  For example, passing
+    ``"*input_quantizer"`` will only match entries whose ``quantizer_name`` is literally
+    ``"*input_quantizer"``, not entries with a different wildcard that would match the same
+    module names at apply time.
+
+    Returns the *last* match because entries are applied in list order and later entries
+    override earlier ones, so the last match represents the effective configuration.
+
+    Args:
+        quant_cfg_list: A list of :class:`QuantizerCfgEntry` dicts.
+        quantizer_name: The exact ``quantizer_name`` string to search for.
+
+    Returns:
+        The last entry whose ``quantizer_name`` equals *quantizer_name*.
+
+    Raises:
+        KeyError: If no entry with the given ``quantizer_name`` is found.
+    """
+    result: dict[str, Any] | None = None
+    for entry in quant_cfg_list:
+        if isinstance(entry, dict) and entry.get("quantizer_name") == quantizer_name:
+            result = entry
+    if result is None:
+        raise KeyError(f"No quant_cfg entry with quantizer_name={quantizer_name!r}")
+    return result
 
 
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
@@ -928,6 +930,7 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
 
 QuantizeQuantCfgType = list[QuantizerCfgEntry]
 QuantizerCfgListConfig = QuantizeQuantCfgType
+QuantizeQuantCfgInputType = Sequence[Mapping[str, Any]]
 
 _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 
@@ -1008,9 +1011,13 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
             # Support multi-key nn.*-scoped dicts by emitting one entry per sub-key.
             entries: list[QuantizerCfgEntry] = []
             for q_path, sub_cfg in value.items():
-                sub_cfg = dict(sub_cfg)
-                enable = sub_cfg.pop("enable", None)
-                cfg = sub_cfg or None
+                if isinstance(sub_cfg, QuantizerAttributeConfig):
+                    enable = None
+                    cfg = sub_cfg
+                else:
+                    sub_cfg = dict(sub_cfg)
+                    enable = sub_cfg.pop("enable", None)
+                    cfg = sub_cfg or None
                 entry: QuantizerCfgEntry = {
                     "parent_class": key,
                     "quantizer_name": q_path,
@@ -1069,20 +1076,26 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
             cfg = entry.get("cfg")
             enable = entry.get("enable", True)
             if enable and cfg is not None:
-                if isinstance(cfg, dict):
+                if isinstance(cfg, QuantizerAttributeConfig):
+                    is_invalid = False
+                elif isinstance(cfg, dict):
                     is_invalid = len(cfg) == 0
                 elif isinstance(cfg, list):
                     is_invalid = len(cfg) == 0 or any(
-                        not isinstance(item, dict) or len(item) == 0 for item in cfg
+                        not isinstance(item, (dict, QuantizerAttributeConfig))
+                        or (isinstance(item, dict) and len(item) == 0)
+                        for item in cfg
                     )
                 else:
                     is_invalid = True
                 if is_invalid:
                     raise ValueError(
-                        f"Invalid quant_cfg entry: {raw!r} — 'cfg' must be a non-empty dict "
-                        f"or a non-empty list of non-empty dicts when enabling a quantizer "
-                        f"(got {type(cfg).__name__}: {cfg!r}). Either provide quantizer "
-                        "attributes in 'cfg' or remove 'cfg' and set 'enable' explicitly."
+                        f"Invalid quant_cfg entry: {raw!r} — 'cfg' must be a "
+                        "QuantizerAttributeConfig, a non-empty dict, or a non-empty list of "
+                        "QuantizerAttributeConfig/non-empty dict entries when enabling a "
+                        f"quantizer (got {type(cfg).__name__}: {cfg!r}). Either provide "
+                        "quantizer attributes in 'cfg' or remove 'cfg' and set 'enable' "
+                        "explicitly."
                     )
 
             # Normalize: make enable and cfg always explicit.
@@ -1156,6 +1169,13 @@ class _QuantizeExportConfig(ModeloptBaseConfig):
     """An empty config."""
 
 
+def _load_quantize_config_dict(config_path: str) -> dict[str, Any]:
+    """Load a schema-backed QuantizeConfig YAML while preserving public dict constants."""
+    config = load_config(config_path)
+    assert isinstance(config, QuantizeConfig), f"{config_path} must declare QuantizeConfig schema."
+    return config.model_dump(exclude_unset=True)
+
+
 _base_disable_all: list[QuantizerCfgEntry] = [
     cast("QuantizerCfgEntry", load_config("configs/ptq/units/base_disable_all"))
 ]
@@ -1211,7 +1231,7 @@ INT8_WEIGHT_ONLY_CFG = {
     "algorithm": "max",
 }
 
-FP8_DEFAULT_CFG: dict[str, Any] = load_config("configs/ptq/presets/model/fp8")
+FP8_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/fp8")
 
 MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
     "quant_cfg": [
@@ -1456,7 +1476,7 @@ MXINT8_DEFAULT_CFG = {
 # KV-cache configs are designed to be merged with a primary quantization config (e.g.
 # FP8_DEFAULT_CFG) that already contains _base_disable_all.  They intentionally omit both
 # _base_disable_all and "algorithm" because these are provided by the primary config.
-FP8_KV_CFG: dict[str, Any] = load_config("configs/ptq/presets/kv/fp8")
+FP8_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8")
 
 FP8_AFFINE_KV_CFG = {
     "quant_cfg": [
@@ -1494,11 +1514,20 @@ def _nvfp4_selective_quant_cfg(
     for pattern in layer_patterns:
         # Deep-copy the quantizer dict so each config constant gets its own instance.
         quant_cfg.append(
-            {"quantizer_name": f"{pattern}weight_quantizer", "cfg": copy.deepcopy(quantizer)}
+            cast(
+                "QuantizerCfgEntry",
+                {"quantizer_name": f"{pattern}weight_quantizer", "cfg": copy.deepcopy(quantizer)},
+            )
         )
         if not weight_only:
             quant_cfg.append(
-                {"quantizer_name": f"{pattern}input_quantizer", "cfg": copy.deepcopy(quantizer)}
+                cast(
+                    "QuantizerCfgEntry",
+                    {
+                        "quantizer_name": f"{pattern}input_quantizer",
+                        "cfg": copy.deepcopy(quantizer),
+                    },
+                )
             )
     quant_cfg.extend(_default_disabled_quantizer_cfg)
     return {"quant_cfg": quant_cfg, "algorithm": algorithm}
@@ -1764,6 +1793,11 @@ def need_calibration(config):
     def _not_dynamic(cfg):
         return cfg.get("enable", True) and cfg.get("type", "") != "dynamic"
 
+    def _cfg_to_dict(cfg):
+        if isinstance(cfg, QuantizerAttributeConfig):
+            return cfg.model_dump(exclude_unset=True)
+        return dict(cfg or {})
+
     quant_cfg: list = config.get("quant_cfg") or []
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
     for entry in quant_cfg:
@@ -1775,10 +1809,13 @@ def need_calibration(config):
         # Sequential quantizers (e.g. W4A8) have a list of cfg dicts
         if isinstance(raw_cfg, list):
             for _config in raw_cfg:
-                if _not_dynamic(_config):
+                cfg = _cfg_to_dict(_config)
+                if "enable" in entry:
+                    cfg["enable"] = entry["enable"]
+                if _not_dynamic(cfg):
                     return True
             continue
-        cfg = dict(raw_cfg or {})
+        cfg = _cfg_to_dict(raw_cfg)
         if "enable" in entry:
             cfg["enable"] = entry["enable"]
         if _not_dynamic(cfg):

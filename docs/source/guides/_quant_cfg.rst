@@ -55,9 +55,12 @@ Each entry in the list is a dictionary with the following fields:
        (e.g. ``"nn.Linear"``). If omitted, all modules are targeted regardless of class.
    * - ``cfg``
      - No
-     - A dict of quantizer attributes as defined by :class:`QuantizerAttributeConfig
-       <modelopt.torch.quantization.config.QuantizerAttributeConfig>`, or a list of such dicts
-       for sequential quantization (see :ref:`sequential-quantizers`).
+     - A :class:`QuantizerAttributeConfig
+       <modelopt.torch.quantization.config.QuantizerAttributeConfig>`, or a list of
+       ``QuantizerAttributeConfig`` objects for sequential quantization (see
+       :ref:`sequential-quantizers`). Equivalent Python dicts, YAML mappings, and lists of
+       dicts are still accepted for backward compatibility, but those weakly schematized forms
+       are deprecated.
    * - ``enable``
      - No
      - ``True`` or ``False``. Toggles matched quantizers on or off, independently of ``cfg``.
@@ -73,6 +76,11 @@ Each entry in the list is a dictionary with the following fields:
     and will raise a ``ValueError`` at config-processing time.  This prevents subtle bugs where
     a bare ``{"quantizer_name": "*"}`` would silently behave as ``enable=True`` for all
     quantizers.
+
+    Schema-backed YAML loading parses ``cfg`` mappings into
+    :class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>`
+    values. Plain Python dicts and lists of dicts are accepted only as a backward-compatible,
+    weakly schematized input format.
 
 ----------
 
@@ -278,7 +286,9 @@ For entirely custom recipes, compose the list directly:
 Sequential Quantization
 =======================
 
-When ``cfg`` is a **list** of attribute dicts, the matched
+When ``cfg`` is a **list** of
+:class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>`
+values, the matched
 :class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer>`
 is replaced with a
 :class:`SequentialQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer>`
@@ -294,6 +304,11 @@ are quantized first in INT4 and then in FP8:
             {"num_bits": (4, 3)},  # FP8
         ],
     }
+
+The list-of-dict spelling shown above remains accepted for existing Python configs and is the
+natural YAML spelling, but it is a deprecated weakly schematized input form. After schema-backed
+loading or :class:`QuantizeConfig <modelopt.torch.quantization.config.QuantizeConfig>` parsing,
+each element is a ``QuantizerAttributeConfig``.
 
 ----------
 
