@@ -1171,9 +1171,7 @@ class _QuantizeExportConfig(ModeloptBaseConfig):
 
 def _load_quantize_config_dict(config_path: str) -> dict[str, Any]:
     """Load a schema-backed QuantizeConfig YAML while preserving public dict constants."""
-    config = load_config(config_path)
-    assert isinstance(config, QuantizeConfig), f"{config_path} must declare QuantizeConfig schema."
-    return config.model_dump(exclude_unset=True)
+    return load_config(config_path, schema_type=QuantizeConfig).model_dump(exclude_unset=True)
 
 
 _base_disable_all: list[QuantizerCfgEntry] = [
