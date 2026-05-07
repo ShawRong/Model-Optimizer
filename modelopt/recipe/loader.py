@@ -122,6 +122,36 @@ def _apply_dotlist(data: dict, overrides: list[str]) -> dict:
     return OmegaConf.to_container(merged, resolve=True)
 
 
+_RECIPE_SCHEMA_BY_TYPE = {
+    RecipeType.PTQ: ModelOptPTQRecipe,
+    RecipeType.SPECULATIVE_EAGLE: ModelOptEagleRecipe,
+    RecipeType.SPECULATIVE_DFLASH: ModelOptDFlashRecipe,
+    RecipeType.SPECULATIVE_MEDUSA: ModelOptMedusaRecipe,
+}
+
+
+def _peek_recipe_type(recipe_file: Path | Traversable) -> RecipeType | None:
+    """Extract ``metadata.recipe_type`` from a recipe YAML without resolving $imports.
+
+    Needed so :func:`load_config` can be called with the correct ``schema_type`` for
+    typed-list ``$import`` resolution before the full recipe is constructed.
+    """
+    import yaml
+
+    text = recipe_file.read_text()
+    raw = yaml.safe_load(text)
+    if not isinstance(raw, dict):
+        return None
+    metadata = raw.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    rtype = metadata.get("recipe_type")
+    try:
+        return RecipeType(rtype)
+    except ValueError:
+        return None
+
+
 def _load_recipe_from_file(
     recipe_file: Path | Traversable,
     overrides: list[str] | None = None,
@@ -131,7 +161,9 @@ def _load_recipe_from_file(
     The file must contain a ``metadata`` section with at least ``recipe_type``,
     plus the algorithm-specific section (``quantize`` / ``eagle`` / ``dflash`` / ``medusa``).
     """
-    data = load_config(recipe_file)
+    rtype = _peek_recipe_type(recipe_file)
+    schema_type = _RECIPE_SCHEMA_BY_TYPE.get(rtype) if rtype is not None else None
+    data = load_config(recipe_file, schema_type=schema_type)
     if not isinstance(data, dict):
         raise ValueError(
             f"Recipe file {recipe_file} must be a YAML mapping, got {type(data).__name__}."
@@ -160,7 +192,7 @@ def _load_recipe_from_file(
         if "eagle" not in data:
             raise ValueError(f"EAGLE recipe file {recipe_file} must contain 'eagle'.")
         return ModelOptEagleRecipe(
-            description=metadata.get("description", "EAGLE speculative decoding recipe."),
+            metadata=metadata,
             model=data.get("model") or {},
             data=data.get("data") or {},
             training=data.get("training") or {},
@@ -170,7 +202,7 @@ def _load_recipe_from_file(
         if "dflash" not in data:
             raise ValueError(f"DFlash recipe file {recipe_file} must contain 'dflash'.")
         return ModelOptDFlashRecipe(
-            description=metadata.get("description", "DFlash speculative decoding recipe."),
+            metadata=metadata,
             model=data.get("model") or {},
             data=data.get("data") or {},
             training=data.get("training") or {},
@@ -180,7 +212,7 @@ def _load_recipe_from_file(
         if "medusa" not in data:
             raise ValueError(f"Medusa recipe file {recipe_file} must contain 'medusa'.")
         return ModelOptMedusaRecipe(
-            description=metadata.get("description", "Medusa speculative decoding recipe."),
+            metadata=metadata,
             model=data.get("model") or {},
             data=data.get("data") or {},
             training=data.get("training") or {},

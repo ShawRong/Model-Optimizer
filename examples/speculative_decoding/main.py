@@ -93,6 +93,39 @@ def _parse_cli() -> tuple[str, list[str]]:
     return args.config, overrides
 
 
+def init_distributed_env(training_args: HfTrainingArguments) -> None:
+    """Resolve dp_shard_size from the live env and attach a ParallelismConfig in-place.
+
+    Reads ``WORLD_SIZE`` / ``torch.cuda.device_count()`` and (when actually distributed)
+    builds an ``accelerate.ParallelismConfig`` on ``training_args``. Kept out of the
+    Pydantic schema so the recipe stays a pure declarative spec.
+    """
+    world_size = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count()))
+    if training_args.dp_shard_size is None:
+        training_args.dp_shard_size = world_size // training_args.cp_size
+
+    if training_args.cp_size > 1 or training_args.dp_shard_size > 1:
+        parallel_size = training_args.dp_shard_size * training_args.cp_size
+        if world_size % parallel_size != 0:
+            raise ValueError(
+                f"world_size ({world_size}) must be divisible by "
+                f"dp_shard_size ({training_args.dp_shard_size}) * "
+                f"cp_size ({training_args.cp_size}) = {parallel_size}"
+            )
+        try:
+            from accelerate import ParallelismConfig
+        except ImportError as e:
+            raise ImportError(
+                "cp_size>1 or dp_shard_size>1 requires `accelerate` for ParallelismConfig. "
+                "Install it via `pip install accelerate`."
+            ) from e
+        training_args.parallelism_config = ParallelismConfig(
+            cp_size=training_args.cp_size,
+            dp_shard_size=training_args.dp_shard_size,
+            dp_replicate_size=world_size // parallel_size,
+        )
+
+
 def train():
     config_path, overrides = _parse_cli()
     recipe = load_recipe(config_path, overrides=overrides)
@@ -100,6 +133,7 @@ def train():
     # Pydantic-typed sections flow straight through as *_args; only TrainingArguments is
     # reconstructed as an HF dataclass so it can be handed to transformers.Trainer.
     training_args = HfTrainingArguments(**recipe.training.model_dump())
+    init_distributed_env(training_args)
 
     if not recipe.data.data_path and not recipe.data.offline_data_path:
         raise ValueError(
