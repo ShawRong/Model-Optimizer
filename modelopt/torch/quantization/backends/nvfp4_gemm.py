@@ -15,6 +15,8 @@
 
 """This module provides a GEMM function for nvfp4 quantization."""
 
+from collections.abc import Mapping
+
 import torch
 from torch.autograd import Function
 
@@ -224,7 +226,7 @@ def _nvfp4_availability_check(module, input, args, kwargs):
         input_cfg = input_cfg[0]
     if isinstance(weight_cfg, list):
         weight_cfg = weight_cfg[0]
-    if not isinstance(input_cfg, dict) or not isinstance(weight_cfg, dict):
+    if not isinstance(input_cfg, Mapping) or not isinstance(weight_cfg, Mapping):
         return False
 
     # Check input quantizer config

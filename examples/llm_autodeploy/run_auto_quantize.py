@@ -24,9 +24,9 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.utils import create_forward_loop
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
-SUPPORT_QUANT_FORMAT = {
-    "fp8": mtq.FP8_DEFAULT_CFG,
-    "nvfp4": mtq.NVFP4_DEFAULT_CFG,
+SUPPORT_QUANT_FORMAT: dict[str, str] = {
+    "fp8": "FP8_DEFAULT_CFG",
+    "nvfp4": "NVFP4_DEFAULT_CFG",
 }
 
 

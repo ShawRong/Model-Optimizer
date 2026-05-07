@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Mapping, MutableMapping
+
 import torch.nn as nn
 from calib.plugin_calib import PercentileCalibrator
 
@@ -104,8 +106,12 @@ def set_quant_config_attr(quant_config, trt_high_precision_dtype, quant_algo, **
     quant_config["algorithm"] = algo_cfg
 
     for entry in quant_config["quant_cfg"]:
-        p = entry.get("cfg", {})
-        if isinstance(p, dict) and "num_bits" in p and "trt_high_precision_dtype" not in p:
+        p = entry.get("cfg", {}) if isinstance(entry, Mapping) else {}
+        if (
+            isinstance(p, MutableMapping)
+            and "num_bits" in p
+            and "trt_high_precision_dtype" not in p
+        ):
             p["trt_high_precision_dtype"] = trt_high_precision_dtype
 
 

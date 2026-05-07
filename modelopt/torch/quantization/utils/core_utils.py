@@ -17,6 +17,7 @@
 
 import copy
 from collections import namedtuple
+from collections.abc import Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +28,7 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import Replicate
 
-from modelopt.torch.quantization.config import QuantizerCfgEntry
+from modelopt.torch.quantization.config import QuantizeConfig, QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 
 if TYPE_CHECKING:
@@ -915,12 +916,13 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
 
 
 def update_quant_cfg_with_kv_cache_quant(
-    quant_cfg: dict[str, Any], kv_cache_quant_cfg: list[QuantizerCfgEntry]
-) -> dict[str, Any]:
+    quant_cfg: QuantizeConfig | Mapping[str, Any],
+    kv_cache_quant_cfg: Sequence[QuantizerCfgEntry | Mapping[str, Any]],
+) -> QuantizeConfig:
     """Update the quant_cfg with the kv cache quant_cfg.
 
     Args:
-        quant_cfg: The outer quantization config dict (with ``"quant_cfg"`` and ``"algorithm"`` keys).
+        quant_cfg: The outer quantization config (with ``"quant_cfg"`` and ``"algorithm"`` keys).
         kv_cache_quant_cfg: A list of :class:`QuantizerCfgEntry
             <modelopt.torch.quantization.config.QuantizerCfgEntry>` dicts for KV cache quantization,
             typically ``some_kv_cfg["quant_cfg"]``.
@@ -929,17 +931,17 @@ def update_quant_cfg_with_kv_cache_quant(
         A deep copy of ``quant_cfg`` with the KV cache entries appended to ``quant_cfg["quant_cfg"]``.
     """
     # If quant_cfg["quant_cfg"] is None, it corresponds to only kv cache quantization case
-    quant_cfg = copy.deepcopy(quant_cfg)
-    inner: list[QuantizerCfgEntry] = quant_cfg.get("quant_cfg") or [
-        {"quantizer_name": "*", "enable": False}
-    ]
-    quant_cfg["quant_cfg"] = inner + list(kv_cache_quant_cfg)
+    updated_quant_cfg: QuantizeConfig = QuantizeConfig.model_validate(copy.deepcopy(quant_cfg))
+    inner = list(
+        updated_quant_cfg.get("quant_cfg") or [QuantizerCfgEntry(quantizer_name="*", enable=False)]
+    )
+    updated_quant_cfg["quant_cfg"] = inner + list(kv_cache_quant_cfg)
 
     # Set default algorithm for kv cache quantization if not provided.
-    if not quant_cfg.get("algorithm"):
-        quant_cfg["algorithm"] = "max"
-    print_rank_0(f"Updated quant_cfg with KV cache quantization: {quant_cfg}")
-    return quant_cfg
+    if not updated_quant_cfg.get("algorithm"):
+        updated_quant_cfg["algorithm"] = "max"
+    print_rank_0(f"Updated quant_cfg with KV cache quantization: {updated_quant_cfg}")
+    return updated_quant_cfg
 
 
 def promote_nvfp4_static_quantizers(model: nn.Module) -> int:

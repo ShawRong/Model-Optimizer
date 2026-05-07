@@ -34,6 +34,7 @@ out-of-range blocks; runs in seconds.
 """
 
 import json
+from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -304,7 +305,7 @@ def force_weight_quantizers_static(quant_cfg: list) -> None:
         qname = entry.get("quantizer_name", "")
         cfg = entry.get("cfg") or {}
         bs = cfg.get("block_sizes")
-        if "weight_quantizer" in qname and isinstance(bs, dict):
+        if "weight_quantizer" in qname and isinstance(bs, Mapping):
             quant_cfg[i] = {**entry, "cfg": {**cfg, "block_sizes": {**bs, "type": "static"}}}
 
 

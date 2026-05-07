@@ -22,7 +22,6 @@ import random
 import time
 import warnings
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import torch
@@ -37,14 +36,14 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export import get_model_type
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
-from modelopt.torch.quantization.config import need_calibration
+from modelopt.torch.quantization.config import QuantizeConfig, need_calibration
 from modelopt.torch.quantization.utils import patch_fsdp_mp_dtypes
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader, get_supported_datasets
 
 # Constants
 RAND_SEED = 1234
 
-QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
+QUANT_CFG_CHOICES: dict[str, QuantizeConfig] = {
     "int8": mtq.INT8_DEFAULT_CFG,
     "int4_awq": mtq.INT4_AWQ_CFG,
     "fp8": mtq.FP8_DEFAULT_CFG,

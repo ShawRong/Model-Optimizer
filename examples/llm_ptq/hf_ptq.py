@@ -66,7 +66,11 @@ from modelopt.torch.export import (
     save_expert_token_count_table,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
-from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
+from modelopt.torch.quantization.config import (
+    QuantizeConfig,
+    _default_disabled_quantizer_cfg,
+    need_calibration,
+)
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.speculative.eagle.utils import (
@@ -89,18 +93,18 @@ RAND_SEED = 1234
 def _set_kv_cache_constant_amax(quant_cfg: list) -> None:
     """Set use_constant_amax on KV cache quantizers.
 
-    Creates a new dict for the KV bmm quantizer config to avoid mutating shared references.
+    Updates the matched KV bmm quantizer entry in place.
     """
-    for i, entry in enumerate(quant_cfg):
+    for entry in quant_cfg:
         if entry.get("quantizer_name") != "*[kv]_bmm_quantizer":
             continue
         cfg = entry.get("cfg") or {}
-        assert isinstance(cfg, dict)
-        quant_cfg[i] = {**entry, "cfg": {**cfg, "use_constant_amax": True}}
+        cfg["use_constant_amax"] = True
+        entry["cfg"] = cfg
         break
 
 
-QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
+QUANT_CFG_CHOICES: dict[str, QuantizeConfig] = {
     "int8": mtq.INT8_DEFAULT_CFG,
     "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
     "int8_wo": mtq.INT8_WEIGHT_ONLY_CFG,

@@ -17,7 +17,7 @@
 
 import fnmatch
 import json
-from collections.abc import Callable, ItemsView, Iterator, KeysView, ValuesView
+from collections.abc import Callable, ItemsView, Iterator, KeysView, MutableMapping, ValuesView
 from typing import Any, TypeAlias
 
 import torch
@@ -57,7 +57,7 @@ def ModeloptField(default: Any = PydanticUndefined, **kwargs):  # noqa: N802
 # TODO: expand config classes to searcher
 
 
-class ModeloptBaseConfig(BaseModel):
+class ModeloptBaseConfig(BaseModel, MutableMapping[str, Any]):
     """Our config base class for mode configuration.
 
     The base class extends the capabilities of pydantic's BaseModel to provide additional methods
@@ -116,6 +116,22 @@ class ModeloptBaseConfig(BaseModel):
     def __setitem__(self, key: str, value: Any) -> None:
         """Set the value for the given key (can be name or alias of field)."""
         setattr(self, self.get_field_name_from_key(key), value)
+
+    def __delitem__(self, key: str) -> None:
+        """Unset the given key so exclude_unset dumps omit it."""
+        field_name = self.get_field_name_from_key(key)
+        if field_name in self._iterable_model_extra:
+            assert self.model_extra is not None
+            del self.model_extra[field_name]
+            self.model_fields_set.discard(field_name)
+            return
+
+        field_info = type(self).model_fields[field_name]
+        default = field_info.get_default(call_default_factory=True)
+        if default is PydanticUndefined:
+            raise AttributeError(f"Key {key} cannot be unset because it has no default.")
+        setattr(self, field_name, default)
+        self.model_fields_set.discard(field_name)
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get the value for the given key (can be name or alias) or default if not found."""

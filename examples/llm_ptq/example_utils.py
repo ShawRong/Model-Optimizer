@@ -23,6 +23,7 @@ import os
 import shutil
 import sys
 import warnings
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,8 @@ from transformers import (
     PreTrainedTokenizerBase,
     ProcessorMixin,
 )
+
+from modelopt.torch.quantization.config import QuantizeConfig
 
 try:
     from huggingface_hub import snapshot_download
@@ -203,17 +206,17 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
 
 def build_quant_cfg(
     qformat,
-    quant_cfg,
+    quant_cfg: QuantizeConfig | Mapping[str, Any],
     awq_block_size,
     model_type,
     moe_calib_experts_ratio: float | None = None,
-) -> dict[str, Any]:
-    quant_cfg = copy.deepcopy(quant_cfg)
-    if "awq" in str(quant_cfg.get("algorithm")):
+) -> QuantizeConfig:
+    quant_cfg_obj: QuantizeConfig = QuantizeConfig.model_validate(copy.deepcopy(quant_cfg))
+    if "awq" in str(quant_cfg_obj.get("algorithm")):
         from modelopt.torch.quantization.config import find_quant_cfg_entry_by_path
 
         weight_quantizer_entry = find_quant_cfg_entry_by_path(
-            quant_cfg["quant_cfg"], "*weight_quantizer"
+            quant_cfg_obj["quant_cfg"], "*weight_quantizer"
         )
         weight_quantizer = weight_quantizer_entry.get("cfg") or {}
         if isinstance(weight_quantizer, list):
@@ -224,34 +227,34 @@ def build_quant_cfg(
 
         # Coarser optimal scale search seems to resolve the overflow in TRT-LLM for some models
         if qformat == "w4a8_awq" and model_type in ["gemma", "mpt"]:
-            quant_cfg["algorithm"] = {"method": "awq_lite", "alpha_step": 1}
+            quant_cfg_obj["algorithm"] = {"method": "awq_lite", "alpha_step": 1}
 
     if moe_calib_experts_ratio:
         assert 0 < moe_calib_experts_ratio <= 1, "moe_calib_experts_ratio must be between 0 and 1"
-        if isinstance(quant_cfg["algorithm"], str):
-            quant_cfg["algorithm"] = {
-                "method": quant_cfg["algorithm"],
+        if isinstance(quant_cfg_obj["algorithm"], str):
+            quant_cfg_obj["algorithm"] = {
+                "method": quant_cfg_obj["algorithm"],
                 "moe_calib_experts_ratio": moe_calib_experts_ratio,
             }
-        elif isinstance(quant_cfg["algorithm"], dict):
-            quant_cfg["algorithm"]["moe_calib_experts_ratio"] = moe_calib_experts_ratio
+        elif isinstance(quant_cfg_obj["algorithm"], MutableMapping):
+            quant_cfg_obj["algorithm"]["moe_calib_experts_ratio"] = moe_calib_experts_ratio
         else:
             warnings.warn(
-                f"Quantization algorithm: {quant_cfg['algorithm']} does not support setting moe_calib_experts_ratio"
+                f"Quantization algorithm: {quant_cfg_obj['algorithm']} does not support setting moe_calib_experts_ratio"
             )
 
     # Gemma 7B has accuracy regression using alpha 1. We set 0.5 instead.
     if model_type == "gemma" and "int8_sq" in qformat:
-        quant_cfg["algorithm"] = {"method": "smoothquant", "alpha": 0.5}
+        quant_cfg_obj["algorithm"] = {"method": "smoothquant", "alpha": 0.5}
 
     if model_type == "phi4mm":
         # Only quantize the language model
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*speech*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*audio*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
-        quant_cfg["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
+        quant_cfg_obj["quant_cfg"].append({"quantizer_name": "*speech*", "enable": False})
+        quant_cfg_obj["quant_cfg"].append({"quantizer_name": "*audio*", "enable": False})
+        quant_cfg_obj["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
+        quant_cfg_obj["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
 
-    return quant_cfg
+    return quant_cfg_obj
 
 
 def is_speculative(hf_config):
@@ -842,7 +845,7 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
 def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
     """Check if quant_cfg has a layerwise_checkpoint_dir that should be auto-resolved to a unique subpath."""
     algorithm = quant_cfg.get("algorithm")
-    if not isinstance(algorithm, dict):
+    if not isinstance(algorithm, Mapping):
         return False
     return algorithm.get("layerwise_checkpoint_dir") is not None
 

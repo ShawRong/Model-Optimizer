@@ -21,7 +21,7 @@ import types
 import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from typing import Any
 
@@ -65,7 +65,7 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
             if not quantizer_attr_cfg:
                 return 1.0
             return min(estimate_quant_compression_for_quantizer(q) for q in quantizer_attr_cfg)
-        if isinstance(quantizer_attr_cfg, dict):
+        if isinstance(quantizer_attr_cfg, Mapping):
             # Handle raw quantizer cfg dicts (e.g. {"num_bits": (4, 3), "axis": None})
             if not quantizer_attr_cfg.get("enable", True):
                 return 1.0
@@ -103,28 +103,38 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
     return estimate_quant_compression_for_quantizer(cfgs) if cfgs else 1.0
 
 
+QuantRecipeConfig = str | Mapping[str, Any] | QuantizeConfig | None
+
+
 class QuantRecipe(CustomHPType):
     """A subclass of QuantizeConfig enabling auto_quantize specific configurations.
 
     Args:
-        quant_cfg: str or dict or None. dict is used for custom quantization formats.
+        quant_cfg: str, QuantizeConfig, mapping, or None. A mapping is used for custom quantization formats.
         name: name for custom quantization formats. Only used if quantization format is a custom
             format not available in :mod:`modelopt.torch.quantization.config`.
     """
 
-    def __init__(self, quant_cfg: str | dict[str, Any] | None = None, name: str | None = None):
+    def __init__(self, quant_cfg: QuantRecipeConfig = None, name: str | None = None):
         """Initialize the QuantRecipe with the quantization configuration."""
         name = self.get_auto_name_for_config(quant_cfg) or name
 
         if quant_cfg is None:
-            quant_cfg = {"quant_cfg": [{"quantizer_name": "*", "enable": False}]}
-        elif isinstance(quant_cfg, str):
-            assert hasattr(mtq_config, quant_cfg), f"Unknown quantization format {quant_cfg}"
-            quant_cfg = getattr(mtq_config, quant_cfg)
+            self.config = mtq_config.QuantizeConfig(
+                quant_cfg=[mtq_config.QuantizerCfgEntry(quantizer_name="*", enable=False)]
+            )
         else:
-            assert name is not None, "name must be provided for custom quantization formats"
+            if isinstance(quant_cfg, str):
+                assert hasattr(mtq_config, quant_cfg), f"Unknown quantization format {quant_cfg}"
+                quant_cfg = getattr(mtq_config, quant_cfg)
+            elif not isinstance(quant_cfg, QuantizeConfig):
+                assert name is not None, "name must be provided for custom quantization formats"
 
-        self.config = mtq_config.QuantizeConfig(**quant_cfg)  # type: ignore [arg-type]
+            self.config = (
+                quant_cfg.model_copy(deep=True)
+                if isinstance(quant_cfg, QuantizeConfig)
+                else mtq_config.QuantizeConfig.model_validate(quant_cfg)
+            )
 
         # Disable KV Cache quantization
         # Currently KV Cache quantization is enabled for some quantization formats and disabled for others
@@ -138,14 +148,25 @@ class QuantRecipe(CustomHPType):
         self._str_repr: str = f"{name}(effective-bits: {self.compression * 16})"
 
     @staticmethod
-    def get_auto_name_for_config(quant_cfg: str | dict[str, Any] | None) -> str | None:
+    def get_auto_name_for_config(quant_cfg: QuantRecipeConfig) -> str | None:
         """Get a name for the quantization configuration."""
         if quant_cfg is None:
             return "NONE"
         if isinstance(quant_cfg, str):
             return quant_cfg
+
+        candidate = (
+            quant_cfg
+            if isinstance(quant_cfg, QuantizeConfig)
+            else mtq_config.QuantizeConfig.model_validate(quant_cfg)
+        )
         for quant_cfg_name in mtq_config.choices:
-            if quant_cfg == getattr(mtq_config, quant_cfg_name):
+            choice = getattr(mtq_config, quant_cfg_name)
+            try:
+                choice = mtq_config.QuantizeConfig.model_validate(choice)
+            except Exception:
+                continue
+            if candidate == choice:
                 return quant_cfg_name
         return None
 

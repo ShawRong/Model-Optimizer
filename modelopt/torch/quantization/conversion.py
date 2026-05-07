@@ -18,7 +18,7 @@
 import fnmatch
 import re
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from typing import Any, cast
 
@@ -415,7 +415,7 @@ def set_quantizer_attributes_full(
 def set_quantizer_attributes_partial(
     quant_model: nn.Module,
     wildcard_or_filter_func: str | Callable,
-    partial_attributes: dict[str, Any] | list[dict[str, Any]],
+    partial_attributes: Mapping[str, Any] | list[Mapping[str, Any]],
     parent_class: type[nn.Module] | None = None,
 ):
     """Update a subset of quantizer attributes by wildcard or filter function, merging with existing attributes.
@@ -450,14 +450,14 @@ def set_quantizer_attributes_partial(
             an instance of this class. If ``None``, all quantizers matching
             ``wildcard_or_filter_func`` are adjusted.
     """
-    if not isinstance(partial_attributes, (dict, list)):
+    if not isinstance(partial_attributes, (Mapping, list)):
         raise ValueError(
-            f"Invalid type for attributes: {type(partial_attributes)}, expected dictionary or list of dict."
+            f"Invalid type for attributes: {type(partial_attributes)}, expected mapping or list of mappings."
         )
     if isinstance(partial_attributes, list) and not all(
-        isinstance(attr, dict) for attr in partial_attributes
+        isinstance(attr, Mapping) for attr in partial_attributes
     ):
-        raise ValueError("All elements in attributes list must be of type dict.")
+        raise ValueError("All elements in attributes list must be mappings.")
 
     for name, module in quant_model.named_modules():
         if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):

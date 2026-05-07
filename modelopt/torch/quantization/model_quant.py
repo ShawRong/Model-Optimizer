@@ -19,7 +19,7 @@ import fnmatch
 import inspect
 import os
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 import torch
@@ -143,7 +143,7 @@ def postprocess_amax(model: nn.Module, key: str, post_process_fn) -> nn.Module:
 
 def quantize(
     model: nn.Module,
-    config: dict[str, Any | QuantizeConfig],
+    config: QuantizeConfig | Mapping[str, Any],
     forward_loop: ForwardLoop | None = None,
 ) -> nn.Module:
     """Quantizes and calibrates the model in-place.
@@ -240,13 +240,15 @@ def quantize(
 
     Returns: A pytorch model which has been quantized and calibrated.
     """
+    validated_config: QuantizeConfig = QuantizeConfig.model_validate(config)
     if not is_quantized(model):
-        model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
+        model = apply_mode(
+            model, mode=[("quantize", dict(validated_config))], registry=QuantizeModeRegistry
+        )
     else:
         # Already quantized, so lets apply the quant_cfg from the config
-        quant_cfg = QuantizeConfig(**dict(config)).quant_cfg
-        set_quantizer_by_cfg(model, quant_cfg)
-    return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
+        set_quantizer_by_cfg(model, validated_config.quant_cfg)
+    return calibrate(model, validated_config.algorithm, forward_loop=forward_loop)
 
 
 # TODO: create a config interface for auto_quantize and expose setting
@@ -271,7 +273,7 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
 def auto_quantize(
     model: nn.Module,
     constraints: dict[str, float | str] = {"effective_bits": 4.8},
-    quantization_formats: list[dict[str, Any] | str] = [
+    quantization_formats: list[QuantizeConfig | Mapping[str, Any] | str | None] = [
         mtq.NVFP4_AWQ_LITE_CFG,
         mtq.FP8_DEFAULT_CFG,
     ],
@@ -500,7 +502,7 @@ def auto_quantize(
 
     for quant_cfg, name in processed_quantization_formats:
         algo = QuantRecipe(quant_cfg, name=name).config.algorithm
-        algo_method = algo["method"] if isinstance(algo, dict) else algo
+        algo_method = algo["method"] if isinstance(algo, Mapping) else algo
         if algo_method not in _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
             raise ValueError(
                 f"Algorithm '{algo_method}' in '{name}' is not supported by auto_quantize yet. "

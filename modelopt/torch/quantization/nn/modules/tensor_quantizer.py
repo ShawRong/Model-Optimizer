@@ -18,7 +18,7 @@
 import contextlib
 import math
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 import torch
@@ -203,7 +203,9 @@ class TensorQuantizer(nn.Module):
         # Optional quantizer cache for caching quantizer related encoding or tensors.
         self._quantizer_cache = None
 
-    def set_from_attribute_config(self, attribute_cfg: QuantizerAttributeConfig | dict[str, Any]):
+    def set_from_attribute_config(
+        self, attribute_cfg: QuantizerAttributeConfig | Mapping[str, Any]
+    ):
         """Set quantizer attributes from attribute_cfg.
 
         The attributes are defined in
@@ -1423,13 +1425,11 @@ class SequentialQuantizer(nn.Sequential):
         return {"num_quantizers": len(self), "is_sequential_quantizer": True}
 
     def set_from_attribute_config(
-        self, attributes: list[QuantizerAttributeConfig] | list[dict[str, Any]]
+        self, attributes: list[QuantizerAttributeConfig] | list[Mapping[str, Any]]
     ):
         """Set the attributes of contained quantizers from a list of attribute_dicts."""
         if not isinstance(attributes, (list, tuple)):
-            assert isinstance(attributes, (dict, QuantizerAttributeConfig)), (
-                "attributes must be a list or a dict."
-            )
+            assert isinstance(attributes, Mapping), "attributes must be a list or a mapping."
             attributes = [attributes] * len(self)
 
         for attribute, quantizer in zip(attributes, self):

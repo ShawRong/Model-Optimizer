@@ -15,6 +15,8 @@
 
 """Test of quantization config validations."""
 
+from collections.abc import MutableMapping
+
 import pytest
 from pydantic import ValidationError
 
@@ -103,10 +105,34 @@ def test_quantizer_cfg_entry_is_pydantic_and_dict_like():
     assert _cfg_to_dict(cfg_entry["cfg"]) == {"num_bits": 8}
 
 
-def test_public_preset_quant_cfg_entries_remain_dicts():
-    """Public preset constants keep legacy dict entries for downstream compatibility."""
-    assert all(isinstance(entry, dict) for entry in FP8_DEFAULT_CFG["quant_cfg"])
-    assert all(isinstance(entry, dict) for entry in NVFP4_DEFAULT_CFG["quant_cfg"])
+def test_quantizer_cfg_entry_mutable_mapping_delitem_unsets_field():
+    """Deleting a config key resets it to unset for exclude_unset dumps."""
+    entry = QuantizerCfgEntry(quantizer_name="*weight_quantizer", cfg={"num_bits": 8}, enable=True)
+    assert isinstance(entry, MutableMapping)
+    assert entry.model_dump(exclude_unset=True) == {
+        "quantizer_name": "*weight_quantizer",
+        "cfg": {"num_bits": 8},
+        "enable": True,
+    }
+
+    del entry["cfg"]
+
+    assert entry["cfg"] is None
+    assert entry.model_dump(exclude_unset=True) == {
+        "quantizer_name": "*weight_quantizer",
+        "enable": True,
+    }
+
+
+def test_public_preset_quant_cfg_entries_are_typed_and_dict_like():
+    """Public preset constants are typed but keep dict-style entry access."""
+    assert isinstance(FP8_DEFAULT_CFG, QuantizeConfig)
+    assert isinstance(NVFP4_DEFAULT_CFG, QuantizeConfig)
+    for preset in (FP8_DEFAULT_CFG, NVFP4_DEFAULT_CFG):
+        assert all(isinstance(entry, QuantizerCfgEntry) for entry in preset["quant_cfg"])
+        for entry in preset["quant_cfg"]:
+            assert entry["quantizer_name"] == entry.quantizer_name
+            assert dict(entry.items())["quantizer_name"] == entry.quantizer_name
 
 
 def test_quantizer_cfg_entry_rejects_no_effect_entry():

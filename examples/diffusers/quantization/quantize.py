@@ -17,6 +17,7 @@ import argparse
 import logging
 import sys
 import time as time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -142,11 +143,13 @@ class Quantizer:
 
         if self.config.format == QuantFormat.FP4:
             for i, entry in enumerate(quant_cfg_list):
-                if isinstance(entry, dict) and "block_sizes" in entry.get("cfg", {}):
-                    new_block_sizes = {**entry["cfg"]["block_sizes"], -1: self.config.block_size}
+                cfg = entry.get("cfg", {}) if isinstance(entry, Mapping) else {}
+                block_sizes = cfg.get("block_sizes") if isinstance(cfg, Mapping) else None
+                if isinstance(block_sizes, Mapping):
+                    new_block_sizes = {**block_sizes, -1: self.config.block_size}
                     quant_cfg_list[i] = {
                         **entry,
-                        "cfg": {**entry["cfg"], "block_sizes": new_block_sizes},
+                        "cfg": {**cfg, "block_sizes": new_block_sizes},
                     }
 
         if self.config.quantize_mha:

@@ -119,11 +119,7 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
         return kv_quant_cfg
 
     kv_entry = next(
-        (
-            e
-            for e in kv_quant_cfg
-            if isinstance(e, dict) and e.get("quantizer_name") == "*[kv]_bmm_quantizer"
-        ),
+        (e for e in kv_quant_cfg if e.get("quantizer_name") == "*[kv]_bmm_quantizer"),
         None,
     )
     if kv_entry is not None:
