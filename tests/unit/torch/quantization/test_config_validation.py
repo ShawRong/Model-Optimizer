@@ -15,6 +15,7 @@
 
 """Test of quantization config validations."""
 
+import copy
 from collections.abc import MutableMapping
 
 import pytest
@@ -31,6 +32,8 @@ from modelopt.torch.quantization.config import (
     QuantizeConfig,
     QuantizerAttributeConfig,
     QuantizerCfgEntry,
+    _base_disable_all,
+    _default_disabled_quantizer_cfg,
     find_quant_cfg_entry_by_path,
     need_calibration,
     normalize_quant_cfg_list,
@@ -133,6 +136,45 @@ def test_public_preset_quant_cfg_entries_are_typed_and_dict_like():
         for entry in preset["quant_cfg"]:
             assert entry["quantizer_name"] == entry.quantizer_name
             assert dict(entry.items())["quantizer_name"] == entry.quantizer_name
+
+
+def test_mixed_raw_dict_and_modelopt_config_entries_normalize_after_mutation():
+    """Mixed raw dict and ModeloptBaseConfig entries normalize after mutation."""
+    config = {
+        "quant_cfg": [
+            *copy.deepcopy(_base_disable_all),
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {
+                    "backend": "custom_backend",
+                    "num_bits": "e5m2",
+                    "pass_through_bwd": True,
+                    "backend_extra_args": {
+                        "format": "scalar",
+                        "block_sizes": 16,
+                    },
+                },
+            },
+            {"quantizer_name": "*input_quantizer", "enable": False},
+            *copy.deepcopy(_default_disabled_quantizer_cfg),
+        ],
+        "algorithm": "max",
+    }
+
+    normalized = normalize_quant_cfg_list(config["quant_cfg"])
+    weight_entry = find_quant_cfg_entry_by_path(normalized, "*weight_quantizer")
+    assert weight_entry["cfg"]["num_bits"] == "e5m2"
+
+    raw_weight_entry = find_quant_cfg_entry_by_path(config["quant_cfg"], "*weight_quantizer")
+    raw_weight_entry["cfg"]["num_bits"] = "e2m1"
+    normalized = normalize_quant_cfg_list(config["quant_cfg"])
+    weight_entry = find_quant_cfg_entry_by_path(normalized, "*weight_quantizer")
+    assert weight_entry["cfg"]["num_bits"] == "e2m1"
+
+    weight_entry["cfg"]["num_bits"] = "e4m3"
+    renormalized = normalize_quant_cfg_list(normalized)
+    weight_entry = find_quant_cfg_entry_by_path(renormalized, "*weight_quantizer")
+    assert weight_entry["cfg"]["num_bits"] == "e4m3"
 
 
 def test_quantizer_cfg_entry_rejects_no_effect_entry():
