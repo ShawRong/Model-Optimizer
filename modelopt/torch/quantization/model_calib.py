@@ -416,7 +416,7 @@ def mse_calibrate(
                         amax=initial_amax,
                         axis=module._calibrator._axis,
                         global_amax=module.global_amax,
-                        quant_func=partial(_mse_quant_func, quantizer=module)
+                        quant_func=partial(_mse_quant_func, quantizer=module),
                     )
                     continue
 

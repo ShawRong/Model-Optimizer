@@ -26,7 +26,6 @@ from huggingface_hub.errors import LocalEntryNotFoundError
 from safetensors.torch import safe_open
 from tqdm import tqdm
 
-
 _HF_HUB_OFFLINE_TRUE_VALUES = {"1", "ON", "YES", "TRUE"}
 
 

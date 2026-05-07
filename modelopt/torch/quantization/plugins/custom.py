@@ -161,9 +161,9 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
             )
         # Static NVFP4 weight _amax is saved calibration state. Preserve it when it
         # matches the local shard; recalibrating would replace MSE scales with max scales.
-        if _has_state(self.weight_quantizer, "_amax") and not _has_complete_static_nvfp4_weight_state(
-            self.weight_quantizer, self.weight
-        ):
+        if _has_state(
+            self.weight_quantizer, "_amax"
+        ) and not _has_complete_static_nvfp4_weight_state(self.weight_quantizer, self.weight):
             self.weight_quantizer.reset_amax()
             max_calibrate(self.weight_quantizer, lambda wq: wq(self.weight), distributed_sync=False)
         if _has_state(self.input_quantizer, "_pre_quant_scale"):

@@ -110,11 +110,11 @@ def test_copy_hf_ckpt_remote_code_hub_id_offline_uses_cache(tmp_path, monkeypatc
 def test_copy_hf_ckpt_remote_code_hub_id_offline_missing_cache_raises(tmp_path, monkeypatch):
     """copy_hf_ckpt_remote_code raises a clear error when offline cache is missing."""
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    with patch(
-        "modelopt.torch.export.plugins.hf_checkpoint_utils.snapshot_download",
-        side_effect=LocalEntryNotFoundError("missing"),
+    with (
+        patch(
+            "modelopt.torch.export.plugins.hf_checkpoint_utils.snapshot_download",
+            side_effect=LocalEntryNotFoundError("missing"),
+        ),
+        pytest.raises(RuntimeError, match="HF_HUB_OFFLINE"),
     ):
-        with pytest.raises(RuntimeError, match="HF_HUB_OFFLINE"):
-            copy_hf_ckpt_remote_code(
-                "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", tmp_path / "dst"
-            )
+        copy_hf_ckpt_remote_code("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", tmp_path / "dst")
