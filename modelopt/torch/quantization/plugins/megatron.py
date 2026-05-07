@@ -40,7 +40,7 @@ from modelopt.torch.opt.plugins.megatron import (
 )
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..nn import NVFP4StaticQuantizer, QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
@@ -190,7 +190,12 @@ def quant_module_set_extra_state(self, state: Any):
     if quantizer_state is not None:
         for name, module in self.named_modules():
             if isinstance(module, TensorQuantizer):
-                module.set_from_modelopt_state(quantizer_state[name], properties_only=False)
+                quantizer_substate = quantizer_state[name]
+                if quantizer_substate.get("_is_nvfp4_static_quantizer") and not isinstance(
+                    module, NVFP4StaticQuantizer
+                ):
+                    NVFP4StaticQuantizer.from_tensor_quantizer(module)
+                module.set_from_modelopt_state(quantizer_substate, properties_only=False)
         self.modelopt_post_restore()
 
     # Handle real_quantizer_state and q_tensor_state
@@ -399,6 +404,9 @@ class _MegatronColumnParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
+            # Static NVFP4 _global_amax is a replicated scalar; only per-block _amax shards.
+            if k.endswith("_global_amax"):
+                continue
             if "weight_quantizer." in k:
                 weight_quantizer_axis = self.get_submodule(k.rsplit(".", 1)[0]).axis
                 if weight_quantizer_axis is not None:
@@ -427,6 +435,9 @@ class _MegatronRowParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
+            # Static NVFP4 _global_amax is a replicated scalar; only per-block _amax shards.
+            if k.endswith("_global_amax"):
+                continue
             if "weight_quantizer." in k:
                 weight_quantizer_axis = None
                 if isinstance(self.weight_quantizer, TensorQuantizer):
