@@ -525,10 +525,29 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
 class QuantizerCfgEntry(ModeloptBaseConfig):
     """A single entry in a ``quant_cfg`` list."""
 
-    quantizer_name: str  # matched against quantizer module names
-    parent_class: str | None = None  # filters by PyTorch module class name, e.g. "nn.Linear"
-    cfg: QuantizerAttributeConfig | list[QuantizerAttributeConfig] | None = None
-    enable: bool | None = None  # toggles matched quantizers on/off; independent of cfg
+    quantizer_name: str = ModeloptField(
+        default="",
+        title="Quantizer name pattern.",
+        description="Wildcard pattern matched against quantizer module names.",
+        validate_default=True,
+    )
+    parent_class: str | None = ModeloptField(
+        default=None,
+        title="Parent module class filter.",
+        description='Optional PyTorch module class name filter, e.g. "nn.Linear".',
+    )
+    cfg: QuantizerAttributeConfig | list[QuantizerAttributeConfig] | None = ModeloptField(
+        default=None,
+        title="Quantizer attributes.",
+        description=(
+            "Attributes to apply to matched quantizers. A list configures a sequential quantizer."
+        ),
+    )
+    enable: bool | None = ModeloptField(
+        default=None,
+        title="Quantizer enable flag.",
+        description="Optional on/off toggle for matched quantizers, independent of cfg.",
+    )
 
     @model_validator(mode="before")
     @classmethod
