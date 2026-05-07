@@ -136,14 +136,39 @@ def test_quantizer_cfg_entry_treats_empty_disabled_cfg_as_disable_only():
 
 class TestNormalizeQuantCfgList:
     def test_new_format_passthrough(self):
-        """New-format entries are returned unchanged (only canonical defaults added)."""
+        """New-format dict entries are normalized into QuantizerCfgEntry objects."""
         raw = [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}}]
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 1
+        assert isinstance(result[0], QuantizerCfgEntry)
         assert result[0]["quantizer_name"] == "*weight_quantizer"
         assert isinstance(result[0]["cfg"], QuantizerAttributeConfig)
         assert _cfg_to_dict(result[0]["cfg"]) == {"num_bits": 8, "axis": 0}
         assert result[0]["enable"] is True  # defaulted
+
+    def test_typed_entry_list_passthrough(self):
+        """Already-parsed QuantizerCfgEntry lists are returned unchanged."""
+        raw = [
+            QuantizerCfgEntry(
+                quantizer_name="*weight_quantizer",
+                cfg=QuantizerAttributeConfig(num_bits=8, axis=0),
+                enable=True,
+            )
+        ]
+        result = normalize_quant_cfg_list(raw)
+        assert result is raw
+        assert result[0] is raw[0]
+
+    def test_mixed_typed_and_dict_entries_normalize_to_typed_entries(self):
+        """Mixed QuantizerCfgEntry/dict input lists normalize dicts and preserve typed entries."""
+        typed_entry = QuantizerCfgEntry(quantizer_name="*", enable=False)
+        result = normalize_quant_cfg_list(
+            [typed_entry, {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
+        )
+        assert result[0] is typed_entry
+        assert isinstance(result[1], QuantizerCfgEntry)
+        assert _cfg_to_dict(result[1]["cfg"]) == {"num_bits": 8}
+        assert result[1]["enable"] is True
 
     def test_new_format_enable_false(self):
         """Explicit enable=False is preserved."""
@@ -292,6 +317,7 @@ class TestNormalizeQuantCfgList:
         ]
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 1
+        assert isinstance(result[0], QuantizerCfgEntry)
         assert isinstance(result[0]["cfg"], list)
         assert all(isinstance(cfg, QuantizerAttributeConfig) for cfg in result[0]["cfg"])
         assert _cfg_to_dict(result[0]["cfg"]) == raw[0]["cfg"]

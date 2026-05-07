@@ -155,7 +155,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 import copy
 import warnings
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import ValidationInfo, field_validator, model_validator
 
@@ -1016,12 +1016,15 @@ _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
 
 
-def normalize_quant_cfg_list(v: Mapping[str, Any] | list) -> list[QuantizerCfgEntry]:
+def normalize_quant_cfg_list(
+    v: Mapping[str, Any] | list[QuantizerCfgEntry | Mapping[str, Any]],
+) -> list[QuantizerCfgEntry]:
     """Normalize a raw quant_cfg into a list of :class:`QuantizerCfgEntry` objects.
 
     Supports the following input forms:
 
     - A ``list`` of entries in any of the per-entry forms below.
+    - A ``list`` containing :class:`QuantizerCfgEntry` objects, which are preserved as-is.
     - A legacy flat ``dict`` (``{"*": ..., "*weight_quantizer": ...}``) - each key/value pair is
       converted to a single-key dict entry and then normalized.
 
@@ -1048,21 +1051,24 @@ def normalize_quant_cfg_list(v: Mapping[str, Any] | list) -> list[QuantizerCfgEn
     - ``enable`` is set to ``True`` if not explicitly specified.
     - ``cfg`` is set to ``None`` if not present in the entry.
 
-    Every returned entry is therefore guaranteed to have ``quantizer_name``, ``enable``, and
-    ``cfg`` set (plus optionally ``parent_class``). The entries remain dict-like for backward
-    compatibility while also being Pydantic models.
+    For dict and legacy inputs, every returned entry is guaranteed to have
+    ``quantizer_name``, ``enable``, and ``cfg`` set (plus optionally ``parent_class``). Typed
+    :class:`QuantizerCfgEntry` inputs are assumed to be already parsed and are preserved.
 
     Args:
         v: A list of raw quant_cfg entries in any supported format, or a legacy flat dict.
 
     Returns:
-        A list of :class:`QuantizerCfgEntry` objects in canonical normalized form.
+        A list of :class:`QuantizerCfgEntry` objects in canonical normalized form. Existing
+        typed entries are preserved.
 
     Raises:
         ValueError: If any entry has only ``quantizer_name`` with neither ``cfg`` nor ``enable``,
             if ``enable=True`` with an empty or non-dict/list ``cfg``, or if the entry format
             is not recognized.
     """
+    if isinstance(v, list) and all(isinstance(raw, QuantizerCfgEntry) for raw in v):
+        return cast("list[QuantizerCfgEntry]", v)
 
     def _warn_legacy():
         warnings.warn(
@@ -1123,8 +1129,9 @@ def normalize_quant_cfg_list(v: Mapping[str, Any] | list) -> list[QuantizerCfgEn
     _warned_legacy = False
     for raw in v:
         if isinstance(raw, QuantizerCfgEntry):
-            entries = [raw.model_dump(exclude_unset=True)]
-        elif isinstance(raw, Mapping) and "quantizer_name" in raw:
+            result.append(raw)
+            continue
+        if isinstance(raw, Mapping) and "quantizer_name" in raw:
             entries = [dict(raw)]  # copy to avoid mutating caller's data
         elif isinstance(raw, Mapping) and len(raw) == 1:
             key, val = next(iter(raw.items()))
@@ -1894,6 +1901,7 @@ def need_calibration(config: QuantizeConfig | Mapping[str, Any]) -> bool:
     for entry in quant_cfg:
         name = entry["quantizer_name"]
         raw_cfg = entry.get("cfg")
+        enable = entry.get("enable")
         if "weight_quantizer" in name:
             # We don't calibrate weight quantizer
             continue
@@ -1901,14 +1909,14 @@ def need_calibration(config: QuantizeConfig | Mapping[str, Any]) -> bool:
         if isinstance(raw_cfg, list):
             for _config in raw_cfg:
                 cfg = _cfg_to_dict(_config)
-                if "enable" in entry:
-                    cfg["enable"] = entry["enable"]
+                if enable is not None:
+                    cfg["enable"] = enable
                 if _not_dynamic(cfg):
                     return True
             continue
         cfg = _cfg_to_dict(raw_cfg)
-        if "enable" in entry:
-            cfg["enable"] = entry["enable"]
+        if enable is not None:
+            cfg["enable"] = enable
         if _not_dynamic(cfg):
             return True
 

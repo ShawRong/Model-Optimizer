@@ -254,7 +254,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgInpu
     for entry in quant_cfg:
         quantizer_name: str = entry["quantizer_name"]
         cfg = entry["cfg"]  # None, QuantizerAttributeConfig, or list after normalization
-        enable: bool = entry["enable"]  # always explicit after normalization
+        enable = entry["enable"] if entry["enable"] is not None else True
         parent_class_name = entry.get("parent_class")
         if parent_class_name:
             try:
