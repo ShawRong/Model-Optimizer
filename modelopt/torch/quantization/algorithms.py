@@ -129,7 +129,9 @@ class QuantRecipe(CustomHPType):
         # Disable KV Cache quantization
         # Currently KV Cache quantization is enabled for some quantization formats and disabled for others
         # This breaks the monotonicity of the quantization formats in terms of weight compression Vs accuracy
-        self.config.quant_cfg.append({"quantizer_name": "*output_quantizer", "enable": False})
+        self.config.quant_cfg.append(
+            mtq_config.QuantizerCfgEntry(quantizer_name="*output_quantizer", enable=False)
+        )
 
         self.compression = estimate_quant_compression(self.config)
 

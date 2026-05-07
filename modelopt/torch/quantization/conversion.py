@@ -253,7 +253,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgInpu
 
     for entry in quant_cfg:
         quantizer_name: str = entry["quantizer_name"]
-        cfg = entry["cfg"]  # None, dict, or list — always explicit after normalization
+        cfg = entry["cfg"]  # None, QuantizerAttributeConfig, or list after normalization
         enable: bool = entry["enable"]  # always explicit after normalization
         parent_class_name = entry.get("parent_class")
         if parent_class_name:
@@ -276,24 +276,12 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgInpu
             # Has cfg: apply full replacement with the explicit enable value.
             if isinstance(cfg, QuantizerAttributeConfig):
                 attributes = cfg.model_copy(update={"enable": enable})
-            elif isinstance(cfg, dict):
-                attributes = QuantizerAttributeConfig(**cfg, enable=enable)
             elif isinstance(cfg, list):
-                attributes = []
-                for c in cfg:
-                    if isinstance(c, QuantizerAttributeConfig):
-                        attributes.append(c.model_copy(update={"enable": enable}))
-                    elif isinstance(c, dict):
-                        attributes.append(QuantizerAttributeConfig(**c, enable=enable))
-                    else:
-                        raise ValueError(
-                            f"Invalid cfg element for quantizer {quantizer_name!r}: expected "
-                            "QuantizerAttributeConfig or dict."
-                        )
+                attributes = [c.model_copy(update={"enable": enable}) for c in cfg]
             else:
                 raise ValueError(
                     f"Invalid cfg for quantizer {quantizer_name!r}: expected "
-                    "QuantizerAttributeConfig, dict, or list."
+                    "QuantizerAttributeConfig or list."
                 )
             set_quantizer_attributes_full(quant_model, quantizer_name, attributes, parent_class)
 

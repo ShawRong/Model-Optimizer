@@ -21,7 +21,11 @@ import pytest
 
 from modelopt.recipe.config import ModelOptPTQRecipe, RecipeMetadataConfig, RecipeType
 from modelopt.recipe.loader import load_config, load_recipe
-from modelopt.torch.quantization.config import QuantizeConfig, QuantizerAttributeConfig
+from modelopt.torch.quantization.config import (
+    QuantizeConfig,
+    QuantizerAttributeConfig,
+    QuantizerCfgEntry,
+)
 
 # ---------------------------------------------------------------------------
 # Static YAML fixtures
@@ -82,6 +86,12 @@ def _cfg_to_dict(cfg):
     if isinstance(cfg, list):
         return [_cfg_to_dict(item) for item in cfg]
     return cfg
+
+
+def _entry_to_dict(entry):
+    if isinstance(entry, QuantizerCfgEntry):
+        return entry.model_dump(exclude_unset=True)
+    return dict(entry)
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +561,11 @@ def test_import_entry_element_schema_appends(tmp_path):
         f"    - $import: disable_all\n"
     )
     recipe = load_recipe(recipe_file)
-    assert recipe.quantize["quant_cfg"] == [{"quantizer_name": "*", "cfg": None, "enable": False}]
+    assert _entry_to_dict(recipe.quantize["quant_cfg"][0]) == {
+        "quantizer_name": "*",
+        "cfg": None,
+        "enable": False,
+    }
 
 
 def test_import_entry_wrong_schema_raises(tmp_path):
@@ -895,7 +909,8 @@ def test_import_list_splice_outside_typed_list_raises(tmp_path):
     """A bare $import in an untyped list is rejected."""
     _write_quantizer_cfg_list(
         tmp_path / "extra_tasks.yml",
-        "- quantizer_name: '*weight_quantizer'\n- quantizer_name: '*input_quantizer'\n",
+        "- quantizer_name: '*weight_quantizer'\n  enable: false\n"
+        "- quantizer_name: '*input_quantizer'\n  enable: false\n",
     )
     config_file = tmp_path / "config.yml"
     config_file.write_text(
@@ -959,7 +974,11 @@ def test_import_mixed_tree(tmp_path):
     # Dict import inside list entry
     assert _cfg_to_dict(data["quant_cfg"][0]["cfg"]) == {"num_bits": (4, 3)}
     # List splice
-    assert data["quant_cfg"][1] == {"quantizer_name": "*lm_head*", "enable": False, "cfg": None}
+    assert _entry_to_dict(data["quant_cfg"][1]) == {
+        "quantizer_name": "*lm_head*",
+        "enable": False,
+        "cfg": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1310,7 +1329,8 @@ def test_import_dict_value_resolves_to_list_raises(tmp_path):
     """$import in dict value position raises when snippet is a list."""
     _write_quantizer_cfg_list(
         tmp_path / "entries.yml",
-        "- quantizer_name: '*weight_quantizer'\n- quantizer_name: '*input_quantizer'\n",
+        "- quantizer_name: '*weight_quantizer'\n  enable: false\n"
+        "- quantizer_name: '*input_quantizer'\n  enable: false\n",
     )
     config_file = tmp_path / "config.yml"
     config_file.write_text(

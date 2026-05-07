@@ -18,6 +18,7 @@
 import pytest
 from pydantic import ValidationError
 
+from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.quantization.config import (
     FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     FP8_DEFAULT_CFG,
@@ -27,10 +28,19 @@ from modelopt.torch.quantization.config import (
     W4A8_AWQ_BETA_CFG,
     QuantizeConfig,
     QuantizerAttributeConfig,
+    QuantizerCfgEntry,
     find_quant_cfg_entry_by_path,
     need_calibration,
     normalize_quant_cfg_list,
 )
+
+
+def _cfg_to_dict(cfg):
+    if isinstance(cfg, QuantizerAttributeConfig):
+        return cfg.model_dump(exclude_unset=True)
+    if isinstance(cfg, list):
+        return [_cfg_to_dict(item) for item in cfg]
+    return cfg
 
 
 def test_need_calibration():
@@ -40,6 +50,12 @@ def test_need_calibration():
     assert need_calibration(INT4_AWQ_CFG)
     assert need_calibration(W4A8_AWQ_BETA_CFG)
     assert need_calibration(NVFP4_DEFAULT_CFG)
+
+
+def test_need_calibration_with_quantize_config_type():
+    """need_calibration accepts schema-backed QuantizeConfig objects."""
+    assert need_calibration(QuantizeConfig.model_validate(FP8_DEFAULT_CFG))
+    assert not need_calibration(QuantizeConfig.model_validate(FP8_PER_CHANNEL_PER_TOKEN_CFG))
 
 
 def test_need_calibration_with_list_cfg():
@@ -74,6 +90,50 @@ def test_need_calibration_with_list_cfg():
     assert not need_calibration(cfg_dynamic)
 
 
+def test_quantizer_cfg_entry_is_pydantic_and_dict_like():
+    """QuantizerCfgEntry is typed but keeps the dict-style access used by callers."""
+    entry = QuantizerCfgEntry(quantizer_name="*", enable=False)
+    assert isinstance(entry, ModeloptBaseConfig)
+    assert entry["quantizer_name"] == "*"
+    assert entry.get("cfg") is None
+    assert entry.model_dump(exclude_unset=True) == {"quantizer_name": "*", "enable": False}
+
+    cfg_entry = QuantizerCfgEntry(quantizer_name="*weight_quantizer", cfg={"num_bits": 8})
+    assert isinstance(cfg_entry["cfg"], QuantizerAttributeConfig)
+    assert _cfg_to_dict(cfg_entry["cfg"]) == {"num_bits": 8}
+
+
+def test_public_preset_quant_cfg_entries_remain_dicts():
+    """Public preset constants keep legacy dict entries for downstream compatibility."""
+    assert all(isinstance(entry, dict) for entry in FP8_DEFAULT_CFG["quant_cfg"])
+    assert all(isinstance(entry, dict) for entry in NVFP4_DEFAULT_CFG["quant_cfg"])
+
+
+def test_quantizer_cfg_entry_rejects_no_effect_entry():
+    """Direct QuantizerCfgEntry construction rejects entries with no cfg or enable."""
+    with pytest.raises(ValidationError, match="must specify 'cfg', 'enable'"):
+        QuantizerCfgEntry(quantizer_name="*")
+
+
+def test_quantizer_cfg_entry_rejects_empty_name():
+    """Direct QuantizerCfgEntry construction rejects empty quantizer names."""
+    with pytest.raises(ValidationError, match="non-empty string"):
+        QuantizerCfgEntry(quantizer_name="", enable=False)
+
+
+def test_quantizer_cfg_entry_rejects_empty_cfg_when_enabled():
+    """Direct QuantizerCfgEntry construction rejects empty enabled cfg values."""
+    with pytest.raises(ValidationError, match="non-empty dict"):
+        QuantizerCfgEntry(quantizer_name="*weight_quantizer", cfg={})
+
+
+def test_quantizer_cfg_entry_treats_empty_disabled_cfg_as_disable_only():
+    """Empty cfg with enable=False remains a disable-only entry."""
+    entry = QuantizerCfgEntry(quantizer_name="*input_quantizer", cfg={}, enable=False)
+    assert entry["cfg"] is None
+    assert entry["enable"] is False
+
+
 class TestNormalizeQuantCfgList:
     def test_new_format_passthrough(self):
         """New-format entries are returned unchanged (only canonical defaults added)."""
@@ -81,7 +141,8 @@ class TestNormalizeQuantCfgList:
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 1
         assert result[0]["quantizer_name"] == "*weight_quantizer"
-        assert result[0]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert isinstance(result[0]["cfg"], QuantizerAttributeConfig)
+        assert _cfg_to_dict(result[0]["cfg"]) == {"num_bits": 8, "axis": 0}
         assert result[0]["enable"] is True  # defaulted
 
     def test_new_format_enable_false(self):
@@ -103,7 +164,7 @@ class TestNormalizeQuantCfgList:
         raw = [{"*weight_quantizer": {"num_bits": 8, "axis": 0}}]
         result = normalize_quant_cfg_list(raw)
         assert result[0]["quantizer_name"] == "*weight_quantizer"
-        assert result[0]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert _cfg_to_dict(result[0]["cfg"]) == {"num_bits": 8, "axis": 0}
         assert result[0]["enable"] is True  # defaulted
 
     def test_legacy_single_key_dict_with_enable(self):
@@ -231,7 +292,9 @@ class TestNormalizeQuantCfgList:
         ]
         result = normalize_quant_cfg_list(raw)
         assert len(result) == 1
-        assert result[0]["cfg"] == raw[0]["cfg"]
+        assert isinstance(result[0]["cfg"], list)
+        assert all(isinstance(cfg, QuantizerAttributeConfig) for cfg in result[0]["cfg"])
+        assert _cfg_to_dict(result[0]["cfg"]) == raw[0]["cfg"]
         assert result[0]["enable"] is True
 
     def test_legacy_flat_dict_conversion(self):
@@ -243,7 +306,7 @@ class TestNormalizeQuantCfgList:
         assert result[0]["enable"] is False
         assert result[0]["cfg"] is None
         assert result[1]["quantizer_name"] == "*weight_quantizer"
-        assert result[1]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert _cfg_to_dict(result[1]["cfg"]) == {"num_bits": 8, "axis": 0}
         assert result[1]["enable"] is True
 
     def test_legacy_enable_only_produces_cfg_none(self):
@@ -274,7 +337,7 @@ class TestNormalizeQuantCfgList:
         raw = [{"default": {"num_bits": 8, "axis": None}}]
         result = normalize_quant_cfg_list(raw)
         assert result[0]["quantizer_name"] == "*"
-        assert result[0]["cfg"] == {"num_bits": 8, "axis": None}
+        assert _cfg_to_dict(result[0]["cfg"]) == {"num_bits": 8, "axis": None}
         assert result[0]["enable"] is True
 
     def test_legacy_flat_dict_with_default_key(self):
@@ -309,7 +372,7 @@ class TestNormalizeQuantCfgList:
         assert len(result) == 1
         assert result[0]["parent_class"] == "nn.Linear"
         assert result[0]["quantizer_name"] == "*weight_quantizer"
-        assert result[0]["cfg"] == {"num_bits": 4, "axis": 0}
+        assert _cfg_to_dict(result[0]["cfg"]) == {"num_bits": 4, "axis": 0}
         assert result[0]["enable"] is True
 
     def test_legacy_list_valued_cfg(self):
@@ -343,7 +406,7 @@ class TestFindQuantCfgEntry:
             ]
         )
         result = find_quant_cfg_entry_by_path(entries, "*weight_quantizer")
-        assert result["cfg"] == {"num_bits": 4}
+        assert _cfg_to_dict(result["cfg"]) == {"num_bits": 4}
 
     def test_exact_match_only(self):
         """Does not do fnmatch — only exact string equality on quantizer_name."""
@@ -400,7 +463,7 @@ class TestMatchQuantizerCfg:
             [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
-        assert matched == {"num_bits": 8}
+        assert _cfg_to_dict(matched) == {"num_bits": 8}
         assert enable is True
 
     def test_star_matches_any_bare_name(self):
@@ -420,7 +483,7 @@ class TestMatchQuantizerCfg:
             [{"quantizer_name": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
-        assert matched == {"num_bits": 4}
+        assert _cfg_to_dict(matched) == {"num_bits": 4}
 
     def test_path_scoped_pattern_does_not_match_different_suffix(self):
         """'*mlp*weight_quantizer' does NOT match bare 'input_quantizer'."""
@@ -444,7 +507,7 @@ class TestMatchQuantizerCfg:
             ]
         )
         matched, _ = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
-        assert matched == {"num_bits": 4}
+        assert _cfg_to_dict(matched) == {"num_bits": 4}
 
     def test_no_match_returns_none(self):
         """No matching entry returns (None, None)."""
