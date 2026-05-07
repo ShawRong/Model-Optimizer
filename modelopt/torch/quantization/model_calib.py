@@ -341,7 +341,6 @@ def mse_calibrate(
     start_multiplier: float = 0.25,
     stop_multiplier: float = 4.0,
     fp8_scale_sweep: bool = False,
-    fp8_scale_sweep_stride: int = 1,
 ):
     """Calibrate the model using MSE-based amax search.
 
@@ -361,8 +360,6 @@ def mse_calibrate(
             for NVFP4 per-block quantization instead of using multipliers.
             This is specifically designed for optimizing the FP8-quantized
             per-block scales in NVFP4 format (default: False).
-        fp8_scale_sweep_stride: Subsample every Nth FP8 E4M3 candidate when
-            fp8_scale_sweep is enabled. A value of 1 preserves exhaustive sweep.
 
     See :class:`MseCalibConfig <modelopt.torch.quantization.config.MseCalibConfig>` for
     details on the remaining arguments.
@@ -419,8 +416,7 @@ def mse_calibrate(
                         amax=initial_amax,
                         axis=module._calibrator._axis,
                         global_amax=module.global_amax,
-                        quant_func=partial(_mse_quant_func, quantizer=module),
-                        fp8_scale_sweep_stride=fp8_scale_sweep_stride,
+                        quant_func=partial(_mse_quant_func, quantizer=module)
                     )
                     continue
 
