@@ -1570,6 +1570,16 @@ MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
     ],
     "algorithm": "max",
 }
+MAMBA_MOE_NVFP4_AGGRESSIVE_MSE_CFG = {
+    "quant_cfg": [
+        *_base_disable_all,
+        {"quantizer_name": "*weight_quantizer", "cfg": _nvfp4_cfg},
+        {"quantizer_name": "*input_quantizer", "cfg": _nvfp4_cfg},
+        *_default_disabled_quantizer_cfg,
+        *_mamba_moe_disabled_quantizer_cfg,
+    ],
+    "algorithm": {"method": "mse", "fp8_scale_sweep": False},
+}
 MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
     "quant_cfg": [
         *_base_disable_all,
@@ -1766,6 +1776,7 @@ choices: set[str] = {
     "NVFP4_OMLP_ONLY_CFG",
     "MAMBA_MOE_NVFP4_CONSERVATIVE_CFG",
     "MAMBA_MOE_NVFP4_AGGRESSIVE_CFG",
+    "MAMBA_MOE_NVFP4_AGGRESSIVE_MSE_CFG",
     "MAMBA_MOE_FP8_CONSERVATIVE_CFG",
     "MAMBA_MOE_FP8_AGGRESSIVE_CFG",
     "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG",
