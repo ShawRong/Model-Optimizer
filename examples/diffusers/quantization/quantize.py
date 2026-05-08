@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import copy
 import logging
 import sys
 import time as time
@@ -50,6 +51,7 @@ from utils import check_conv_and_mha, check_lora
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.opt.config import ModeloptBaseConfig
 
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
@@ -120,14 +122,6 @@ class Quantizer:
                 base_cfg = mtq.INT8_SMOOTHQUANT_CFG
             else:
                 base_cfg = INT8_DEFAULT_CONFIG
-            if self.config.collect_method != CollectMethod.DEFAULT:
-                reset_set_int8_config(
-                    base_cfg,
-                    self.config.percentile,
-                    n_steps,
-                    collect_method=self.config.collect_method.value,
-                    backbone=backbone,
-                )
         elif self.config.format == QuantFormat.FP8:
             base_cfg = FP8_DEFAULT_CONFIG
         elif self.config.format == QuantFormat.FP4:
@@ -139,6 +133,22 @@ class Quantizer:
             raise NotImplementedError(f"Unknown format {self.config.format}")
 
         # Build a fresh config dict so we never mutate the global constants.
+        if isinstance(base_cfg, ModeloptBaseConfig):
+            base_cfg = base_cfg.model_dump(exclude_unset=True)
+        base_cfg = copy.deepcopy(base_cfg)
+
+        if (
+            self.config.format == QuantFormat.INT8
+            and self.config.collect_method != CollectMethod.DEFAULT
+        ):
+            reset_set_int8_config(
+                base_cfg,
+                self.config.percentile,
+                n_steps,
+                collect_method=self.config.collect_method.value,
+                backbone=backbone,
+            )
+
         quant_cfg_list = list(base_cfg["quant_cfg"])
 
         if self.config.format == QuantFormat.FP4:

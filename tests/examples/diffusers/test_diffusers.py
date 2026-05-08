@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+import importlib.util
+import sys
 from pathlib import Path
 from typing import NamedTuple
 
@@ -20,6 +23,44 @@ import pytest
 from _test_utils.examples.models import FLUX_SCHNELL_PATH, SD3_PATH, SDXL_1_0_PATH
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_sm
+
+
+def _load_diffusers_quantization_config_module():
+    quantization_dir = (
+        Path(__file__).resolve().parents[3] / "examples" / "diffusers" / "quantization"
+    )
+    sys.path.insert(0, str(quantization_dir))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "diffusers_quantization_config", quantization_dir / "config.py"
+        )
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(quantization_dir))
+    return module
+
+
+def test_diffusers_quant_config_attr_uses_explicit_schema_keys() -> None:
+    import modelopt.torch.quantization as mtq
+
+    config_module = _load_diffusers_quantization_config_module()
+    quant_config = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
+    input_cfg = next(
+        entry["cfg"]
+        for entry in quant_config["quant_cfg"]
+        if entry["quantizer_name"] == "*input_quantizer"
+    )
+
+    assert "trt_high_precision_dtype" in input_cfg
+    assert "trt_high_precision_dtype" not in input_cfg.explicit_keys()
+
+    config_module.set_quant_config_attr(quant_config, "Half", "smoothquant", alpha=0.8)
+
+    assert input_cfg["trt_high_precision_dtype"] == "Half"
+    assert quant_config["algorithm"] == {"method": "smoothquant", "alpha": 0.8}
 
 
 class DiffuserModel(NamedTuple):

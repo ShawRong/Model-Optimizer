@@ -18,6 +18,8 @@ from collections.abc import Mapping, MutableMapping
 import torch.nn as nn
 from calib.plugin_calib import PercentileCalibrator
 
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+
 FP8_DEFAULT_CONFIG = {
     "quant_cfg": [
         {"quantizer_name": "*", "enable": False},
@@ -107,11 +109,12 @@ def set_quant_config_attr(quant_config, trt_high_precision_dtype, quant_algo, **
 
     for entry in quant_config["quant_cfg"]:
         p = entry.get("cfg", {}) if isinstance(entry, Mapping) else {}
-        if (
-            isinstance(p, MutableMapping)
-            and "num_bits" in p
-            and "trt_high_precision_dtype" not in p
-        ):
+        if not isinstance(p, MutableMapping):
+            continue
+        keys = p.explicit_keys() if isinstance(p, QuantizerAttributeConfig) else p.keys()
+        # TODO: Replace this membership-based config patching with a better config API;
+        # ``in``/``not in`` checks are fragile with schema-backed defaults.
+        if "num_bits" in keys and "trt_high_precision_dtype" not in keys:
             p["trt_high_precision_dtype"] = trt_high_precision_dtype
 
 
