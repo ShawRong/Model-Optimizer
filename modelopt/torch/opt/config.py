@@ -60,8 +60,15 @@ def ModeloptField(default: Any = PydanticUndefined, **kwargs):  # noqa: N802
 class ModeloptBaseConfig(BaseModel, MutableMapping[str, Any]):
     """Our config base class for mode configuration.
 
-    The base class extends the capabilities of pydantic's BaseModel to provide additional methods
-    and properties for easier access and manipulation of the configuration.
+    The base class extends pydantic's BaseModel with a mapping interface so schema-backed
+    config objects can keep the dict-style access patterns used by older ModelOpt code.
+
+    This is intentionally a fixed-key mutable mapping instead of a general dict. The mapping
+    keys are the model fields exposed through their aliases when present, and lookups accept
+    either a field name or its alias. Values are read and written through the pydantic model, so
+    assignment validation still applies. New keys cannot be inserted, and existing keys cannot
+    be deleted because the schema defines the complete key set; callers that need omission
+    semantics should use model_dump(exclude_unset=True) or the explicit_* helpers.
     """
 
     model_config = PyDanticConfigDict(extra="forbid", validate_assignment=True)
@@ -111,44 +118,42 @@ class ModeloptBaseConfig(BaseModel, MutableMapping[str, Any]):
 
     def __getitem__(self, key: str) -> Any:
         """Get the value for the given key (can be name or alias of field)."""
-        return getattr(self, self.get_field_name_from_key(key))
+        try:
+            return getattr(self, self.get_field_name_from_key(key))
+        except AttributeError as e:
+            raise KeyError(key) from e
 
     def __setitem__(self, key: str, value: Any) -> None:
-        """Set the value for the given key (can be name or alias of field)."""
-        setattr(self, self.get_field_name_from_key(key), value)
-
-    def __delitem__(self, key: str) -> None:
-        """Unset the given key so exclude_unset dumps omit it."""
+        """Set an existing field by name or alias, preserving pydantic assignment validation."""
         try:
             field_name = self.get_field_name_from_key(key)
         except AttributeError as e:
             raise KeyError(key) from e
-        if field_name in self._iterable_model_extra:
-            assert self.model_extra is not None
-            del self.model_extra[field_name]
-            self.model_fields_set.discard(field_name)
-            return
+        if field_name not in type(self).model_fields:
+            raise KeyError(key)
+        setattr(self, field_name, value)
 
-        field_info = type(self).model_fields[field_name]
-        default = field_info.get_default(call_default_factory=True)
-        if default is PydanticUndefined:
-            raise KeyError(f"Key {key} cannot be unset because it has no default.")
-        self.__dict__[field_name] = default
-        self.model_fields_set.discard(field_name)
+    def __delitem__(self, key: str) -> None:
+        """Reject deletion because ModeloptBaseConfig exposes a fixed schema key set."""
+        try:
+            self.get_field_name_from_key(key)
+        except AttributeError as e:
+            raise KeyError(key) from e
+        raise TypeError("Config mapping keys are fixed and cannot be deleted.")
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get the value for the given key (can be name or alias) or default if not found."""
         try:
             return self[key]
-        except AttributeError:
+        except KeyError:
             return default
 
     def __len__(self) -> int:
-        """Return the length of the config."""
-        return len(self.model_fields) + len(self._iterable_model_extra)
+        """Return the number of schema and extra keys exposed by the mapping."""
+        return len(type(self).model_fields) + len(self._iterable_model_extra)
 
     def __iter__(self) -> Iterator[str]:
-        """Iterate over aliases (or name if alias is not defined) of fields."""
+        """Iterate over schema keys, preferring aliases over field names."""
         for field_name, field_info in type(self).model_fields.items():
             yield field_info.alias or field_name
         yield from self._iterable_model_extra
@@ -156,6 +161,29 @@ class ModeloptBaseConfig(BaseModel, MutableMapping[str, Any]):
     def _get_kv_dict(self) -> dict[str, Any]:
         """Return a dictionary with keys as aliases if possible."""
         return {k: self[k] for k in self}
+
+    def iter_explicit_keys(self) -> Iterator[str]:
+        """Iterate over explicitly set schema keys, preferring aliases over field names."""
+        for field_name, field_info in type(self).model_fields.items():
+            if field_name in self.model_fields_set:
+                yield field_info.alias or field_name
+        yield from self._iterable_model_extra
+
+    def _get_explicit_kv_dict(self) -> dict[str, Any]:
+        """Return explicitly set key-value pairs with keys as aliases if possible."""
+        return {k: self[k] for k in self.iter_explicit_keys()}
+
+    def explicit_keys(self) -> KeysView[str]:
+        """Return the explicitly set keys of the config."""
+        return self._get_explicit_kv_dict().keys()
+
+    def explicit_values(self) -> ValuesView[Any]:
+        """Return the explicitly set values of the config."""
+        return self._get_explicit_kv_dict().values()
+
+    def explicit_items(self) -> ItemsView[str, Any]:
+        """Return the explicitly set items of the config with keys as aliases if possible."""
+        return self._get_explicit_kv_dict().items()
 
     def keys(self) -> KeysView[str]:
         """Return the keys (aliases prioritized over names) of the config."""

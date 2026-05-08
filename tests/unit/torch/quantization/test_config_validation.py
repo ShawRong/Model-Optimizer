@@ -59,6 +59,7 @@ def test_need_calibration():
 
 def test_need_calibration_with_quantize_config_type():
     """need_calibration accepts schema-backed QuantizeConfig objects."""
+    assert need_calibration(QuantizeConfig())
     assert need_calibration(QuantizeConfig.model_validate(FP8_DEFAULT_CFG))
     assert not need_calibration(QuantizeConfig.model_validate(FP8_PER_CHANNEL_PER_TOKEN_CFG))
 
@@ -100,7 +101,18 @@ def test_quantizer_cfg_entry_is_pydantic_and_dict_like():
     entry = QuantizerCfgEntry(quantizer_name="*", enable=False)
     assert isinstance(entry, ModeloptBaseConfig)
     assert entry["quantizer_name"] == "*"
-    assert entry.get("cfg") is None
+    assert entry["cfg"] is None
+    assert "cfg" in entry
+    assert list(entry) == ["quantizer_name", "parent_class", "cfg", "enable"]
+    assert dict(entry.items()) == {
+        "quantizer_name": "*",
+        "parent_class": None,
+        "cfg": None,
+        "enable": False,
+    }
+    assert dict(entry.explicit_items()) == {"quantizer_name": "*", "enable": False}
+    with pytest.raises(KeyError):
+        entry["unknown"] = 1
     assert entry.model_dump(exclude_unset=True) == {"quantizer_name": "*", "enable": False}
 
     cfg_entry = QuantizerCfgEntry(quantizer_name="*weight_quantizer", cfg={"num_bits": 8})
@@ -108,8 +120,8 @@ def test_quantizer_cfg_entry_is_pydantic_and_dict_like():
     assert _cfg_to_dict(cfg_entry["cfg"]) == {"num_bits": 8}
 
 
-def test_quantizer_cfg_entry_mutable_mapping_delitem_unsets_field():
-    """Deleting a config key resets it to unset for exclude_unset dumps."""
+def test_quantizer_cfg_entry_mutable_mapping_rejects_key_deletion():
+    """ModeloptBaseConfig mappings have a fixed key set and reject deletion."""
     entry = QuantizerCfgEntry(quantizer_name="*weight_quantizer", cfg={"num_bits": 8}, enable=True)
     assert isinstance(entry, MutableMapping)
     assert entry.model_dump(exclude_unset=True) == {
@@ -118,11 +130,14 @@ def test_quantizer_cfg_entry_mutable_mapping_delitem_unsets_field():
         "enable": True,
     }
 
-    del entry["cfg"]
+    with pytest.raises(TypeError):
+        del entry["cfg"]
 
-    assert entry["cfg"] is None
+    assert "cfg" in entry
+    assert entry["cfg"] is not None
     assert entry.model_dump(exclude_unset=True) == {
         "quantizer_name": "*weight_quantizer",
+        "cfg": {"num_bits": 8},
         "enable": True,
     }
 
@@ -196,10 +211,13 @@ def test_quantizer_cfg_entry_rejects_explicit_null_values(raw, match):
         normalize_quant_cfg_list([raw])
 
 
-def test_quantizer_cfg_entry_rejects_no_effect_entry():
-    """Direct QuantizerCfgEntry construction rejects entries with no cfg or enable."""
-    with pytest.raises(ValidationError, match="must specify 'cfg', 'enable'"):
-        QuantizerCfgEntry(quantizer_name="*")
+def test_quantizer_cfg_entry_defaults_enable_true():
+    """Direct QuantizerCfgEntry construction uses enable=True when omitted."""
+    entry = QuantizerCfgEntry(quantizer_name="*")
+    assert entry["enable"] is True
+    assert entry["cfg"] is None
+    assert dict(entry.explicit_items()) == {"quantizer_name": "*"}
+    assert entry.model_dump(exclude_unset=True) == {"quantizer_name": "*"}
 
 
 def test_quantizer_cfg_entry_rejects_empty_name():
@@ -231,7 +249,8 @@ class TestNormalizeQuantCfgList:
         assert result[0]["quantizer_name"] == "*weight_quantizer"
         assert isinstance(result[0]["cfg"], QuantizerAttributeConfig)
         assert _cfg_to_dict(result[0]["cfg"]) == {"num_bits": 8, "axis": 0}
-        assert result[0]["enable"] is True  # defaulted
+        assert result[0]["enable"] is True  # schema default
+        assert "enable" not in dict(result[0].explicit_items())
 
     def test_typed_entry_list_passthrough(self):
         """Already-parsed QuantizerCfgEntry lists are returned unchanged."""
@@ -256,6 +275,7 @@ class TestNormalizeQuantCfgList:
         assert isinstance(result[1], QuantizerCfgEntry)
         assert _cfg_to_dict(result[1]["cfg"]) == {"num_bits": 8}
         assert result[1]["enable"] is True
+        assert "enable" not in dict(result[1].explicit_items())
 
     def test_new_format_enable_false(self):
         """Explicit enable=False is preserved."""
@@ -277,7 +297,8 @@ class TestNormalizeQuantCfgList:
         result = normalize_quant_cfg_list(raw)
         assert result[0]["quantizer_name"] == "*weight_quantizer"
         assert _cfg_to_dict(result[0]["cfg"]) == {"num_bits": 8, "axis": 0}
-        assert result[0]["enable"] is True  # defaulted
+        assert result[0]["enable"] is True  # schema default
+        assert "enable" not in dict(result[0].explicit_items())
 
     def test_legacy_single_key_dict_with_enable(self):
         """Legacy {'*path': {'enable': False}} splits enable out from cfg."""
@@ -296,17 +317,19 @@ class TestNormalizeQuantCfgList:
         assert result[0]["enable"] is False
 
     def test_normalization_cfg_defaults_to_none(self):
-        """Entries without cfg get cfg=None after normalization."""
+        """Entries without cfg expose the default mapping key but keep it unset."""
         raw = [{"quantizer_name": "*lm_head*", "enable": False}]
         result = normalize_quant_cfg_list(raw)
         assert "cfg" in result[0]
         assert result[0]["cfg"] is None
+        assert "cfg" not in dict(result[0].explicit_items())
 
     def test_normalization_enable_defaults_to_true(self):
-        """Entries with cfg but no enable get enable=True after normalization."""
+        """Entries with cfg but no enable read as enable=True without marking it explicit."""
         raw = [{"quantizer_name": "*", "cfg": {"num_bits": 4}}]
         result = normalize_quant_cfg_list(raw)
         assert result[0]["enable"] is True
+        assert "enable" not in dict(result[0].explicit_items())
 
     def test_empty_list(self):
         """Empty list is returned unchanged."""
@@ -322,10 +345,13 @@ class TestNormalizeQuantCfgList:
         assert result[0]["quantizer_name"] == "*"
         assert result[1]["quantizer_name"] == "*weight_quantizer"
 
-    def test_error_on_quantizer_name_only(self):
-        """Entry with only quantizer_name and no cfg or enable is rejected."""
-        with pytest.raises(ValueError, match="must specify 'cfg', 'enable'"):
-            normalize_quant_cfg_list([{"quantizer_name": "*"}])
+    def test_quantizer_name_only_defaults_enable_true(self):
+        """Entry with only quantizer_name uses enable=True from the schema default."""
+        result = normalize_quant_cfg_list([{"quantizer_name": "*"}])
+        assert result[0]["enable"] is True
+        assert result[0]["cfg"] is None
+        assert dict(result[0].explicit_items()) == {"quantizer_name": "*"}
+        assert result[0].model_dump(exclude_unset=True) == {"quantizer_name": "*"}
 
     def test_error_on_empty_dict(self):
         """An empty dict entry is rejected."""
@@ -421,6 +447,7 @@ class TestNormalizeQuantCfgList:
         assert result[1]["quantizer_name"] == "*weight_quantizer"
         assert _cfg_to_dict(result[1]["cfg"]) == {"num_bits": 8, "axis": 0}
         assert result[1]["enable"] is True
+        assert "enable" not in dict(result[1].explicit_items())
 
     def test_legacy_enable_only_produces_cfg_none(self):
         """Legacy {'*': {'enable': False}} should produce cfg=None, not cfg={}."""

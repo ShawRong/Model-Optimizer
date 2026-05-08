@@ -543,8 +543,8 @@ class QuantizerCfgEntry(ModeloptBaseConfig):
             "Attributes to apply to matched quantizers. A list configures a sequential quantizer."
         ),
     )
-    enable: bool | None = ModeloptField(
-        default=None,
+    enable: bool = ModeloptField(
+        default=True,
         title="Quantizer enable flag.",
         description="Optional on/off toggle for matched quantizers, independent of cfg.",
     )
@@ -556,11 +556,6 @@ class QuantizerCfgEntry(ModeloptBaseConfig):
         if not isinstance(values, Mapping):
             return values
 
-        if "cfg" not in values and "enable" not in values:
-            raise ValueError(
-                "Each quant_cfg entry must specify 'cfg', 'enable', or both. "
-                "An entry with only 'quantizer_name' has no effect."
-            )
         if "cfg" in values and values["cfg"] is None:
             raise ValueError("cfg must be omitted or a valid mapping/list, not null.")
         if "enable" in values and values["enable"] is None:
@@ -1038,25 +1033,21 @@ def normalize_quant_cfg_list(
     - Legacy ``nn.*``-scoped format: ``{"nn.<Class>": {"<quantizer_name>": <cfg>}}`` - converted
       to a new-format entry with ``parent_class`` set.
 
-    **Validation** - an entry is rejected if it carries no instruction, i.e. it specifies neither
-    ``cfg`` nor ``enable``.  Concretely, the following are invalid:
+    **Validation** - an entry is rejected if its shape is invalid.  Concretely, the following
+    are invalid:
 
     - An empty entry ``{}``.
-    - An entry with only ``quantizer_name`` and no other keys - the only effect would be an
-      implicit ``enable=True``, which must be stated explicitly.
     - An entry with ``enable=True`` (explicit or implicit) whose ``cfg`` is not a non-empty
       ``dict`` or ``list`` - e.g. ``{"quantizer_name": "*", "cfg": {}}`` or
       ``{"quantizer_name": "*", "cfg": 42}``.  An enabled quantizer must have a valid
       configuration.
 
-    **Normalization** - after conversion and validation every entry is put into canonical form:
-
-    - ``enable`` is set to ``True`` if not explicitly specified.
-    - ``cfg`` is set to ``None`` if not present in the entry.
-
-    For dict and legacy inputs, every returned entry is guaranteed to have
-    ``quantizer_name``, ``enable``, and ``cfg`` set (plus optionally ``parent_class``). Typed
-    :class:`QuantizerCfgEntry` inputs are assumed to be already parsed and are preserved.
+    **Normalization** - after conversion and validation every entry is parsed as a
+    :class:`QuantizerCfgEntry`. Schema defaults are available through mapping access, so ``enable``
+    defaults to ``True`` and ``cfg`` defaults to ``None`` when omitted. Omitted defaults are not
+    marked as explicitly set, so ``model_dump(exclude_unset=True)`` preserves the user's sparse
+    input shape. Typed :class:`QuantizerCfgEntry` inputs are assumed to be already parsed and are
+    preserved.
 
     Args:
         v: A list of raw quant_cfg entries in any supported format, or a legacy flat dict.
@@ -1066,9 +1057,8 @@ def normalize_quant_cfg_list(
         typed entries are preserved.
 
     Raises:
-        ValueError: If any entry has only ``quantizer_name`` with neither ``cfg`` nor ``enable``,
-            if ``enable=True`` with an empty or non-dict/list ``cfg``, or if the entry format
-            is not recognized.
+        ValueError: If ``enable=True`` with an empty or non-dict/list ``cfg``, or if the entry
+            format is not recognized.
     """
     if isinstance(v, list) and all(isinstance(raw, QuantizerCfgEntry) for raw in v):
         return cast("list[QuantizerCfgEntry]", v)
@@ -1164,14 +1154,6 @@ def normalize_quant_cfg_list(
             raise ValueError(f"Invalid quant_cfg entry: {raw!r}.")
 
         for entry in entries:
-            # Validate: must carry at least one instruction beyond the path selector.
-            if "cfg" not in entry and "enable" not in entry:
-                raise ValueError(
-                    f"Invalid quant_cfg entry: {raw!r} - each entry must specify 'cfg', 'enable', "
-                    "or both. An entry with only 'quantizer_name' has no effect (implicit "
-                    "enable=True is not allowed; set it explicitly)."
-                )
-
             # Validate: when cfg is present and enable=True, cfg must be a non-empty
             # dict or list.  An empty cfg would attempt to create a
             # QuantizerAttributeConfig with no actual configuration.
@@ -1210,9 +1192,6 @@ def normalize_quant_cfg_list(
                         "quantizer attributes in 'cfg' or remove 'cfg' and set 'enable' "
                         "explicitly."
                     )
-
-            # Normalize: make enable explicit. cfg remains omitted when it is intentionally unset.
-            entry.setdefault("enable", True)
 
             result.append(QuantizerCfgEntry.model_validate(entry))
     return result
@@ -1981,7 +1960,7 @@ def need_calibration(config: QuantizeConfig | Mapping[str, Any]) -> bool:
     for entry in quant_cfg:
         name = entry["quantizer_name"]
         raw_cfg = entry.get("cfg")
-        enable = entry.get("enable")
+        enable = entry["enable"]
         if "weight_quantizer" in name:
             # We don't calibrate weight quantizer
             continue
@@ -1989,14 +1968,12 @@ def need_calibration(config: QuantizeConfig | Mapping[str, Any]) -> bool:
         if isinstance(raw_cfg, list):
             for _config in raw_cfg:
                 cfg = _cfg_to_dict(_config)
-                if enable is not None:
-                    cfg["enable"] = enable
+                cfg["enable"] = enable
                 if _not_dynamic(cfg):
                     return True
             continue
         cfg = _cfg_to_dict(raw_cfg)
-        if enable is not None:
-            cfg["enable"] = enable
+        cfg["enable"] = enable
         if _not_dynamic(cfg):
             return True
 
