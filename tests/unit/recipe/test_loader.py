@@ -563,7 +563,6 @@ def test_import_entry_element_schema_appends(tmp_path):
     recipe = load_recipe(recipe_file)
     assert _entry_to_dict(recipe.quantize["quant_cfg"][0]) == {
         "quantizer_name": "*",
-        "cfg": None,
         "enable": False,
     }
 
@@ -977,7 +976,6 @@ def test_import_mixed_tree(tmp_path):
     assert _entry_to_dict(data["quant_cfg"][1]) == {
         "quantizer_name": "*lm_head*",
         "enable": False,
-        "cfg": None,
     }
 
 
