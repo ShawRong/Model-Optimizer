@@ -287,9 +287,32 @@ def _ensure_weight_quantizer_calibrated(
         module_name: Optional module name for better warning messages
     """
     if isinstance(weight_quantizer, NVFP4StaticQuantizer):
-        need_per_block = not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None
+        # `_amax` and `_global_amax` are registered as buffers via
+        # `register_buffer(..., torch.empty(...))` during MCore restore, so a
+        # buffer can be present-and-non-None yet contain uninitialized memory
+        # if the corresponding distcp shard didn't fill it (observed for
+        # routed experts that did not receive any tokens during calibration:
+        # the resulting per-block buffer carried valid-but-absurd negative
+        # FP32 values like -1e37, which propagate through static export to
+        # produce bogus FP8 weight_scale bytes and NaN logits at serving
+        # time). Treat any non-finite or negative entry as "needs recompute".
+        def _amax_is_invalid(t: torch.Tensor | None) -> bool:
+            if t is None:
+                return True
+            t = t.detach()
+            if not torch.is_floating_point(t):
+                return False
+            return bool(torch.any(~torch.isfinite(t)).item() or torch.any(t < 0).item())
+
+        need_per_block = (
+            not hasattr(weight_quantizer, "_amax")
+            or weight_quantizer._amax is None
+            or _amax_is_invalid(weight_quantizer._amax)
+        )
         need_global = (
-            not hasattr(weight_quantizer, "_global_amax") or weight_quantizer.global_amax is None
+            not hasattr(weight_quantizer, "_global_amax")
+            or weight_quantizer.global_amax is None
+            or _amax_is_invalid(weight_quantizer.global_amax)
         )
         if not (need_per_block or need_global):
             return

@@ -688,6 +688,22 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
         "start_multiplier, and stop_multiplier are ignored.",
     )
 
+    fp8_scale_sweep_stride: int | None = ModeloptField(
+        default=None,
+        exclude=True,
+        title="Deprecated FP8 scale sweep stride.",
+        description="Deprecated restore-only field kept so older checkpoints that saved "
+        "fp8_scale_sweep_stride in modelopt_state can be loaded. It is ignored.",
+    )
+
+    fp8_scale_sweep_backend: str | None = ModeloptField(
+        default=None,
+        exclude=True,
+        title="Deprecated FP8 scale sweep backend.",
+        description="Deprecated restore-only field kept so older checkpoints that saved "
+        "fp8_scale_sweep_backend in modelopt_state can be loaded. It is ignored.",
+    )
+
     distributed_sync: bool | None = ModeloptField(
         default=True,
         title="Whether to sync the amax across the distributed processes.",

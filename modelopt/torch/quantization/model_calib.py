@@ -52,6 +52,7 @@ from .utils import (
     promote_nvfp4_static_quantizers,
     quantizer_attr_names,
     reduce_amax,
+    reduce_block_amax,
     weight_attr_names,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
@@ -117,6 +118,10 @@ def _is_dynamic_block_quantizer(quantizer) -> bool:
     return getattr(block_sizes, "type", None) == "dynamic"
 
 
+def _is_block_quantizer(quantizer) -> bool:
+    return getattr(quantizer, "block_sizes", None) is not None
+
+
 def _iter_leaf_quantizers(quantizer):
     if isinstance(quantizer, SequentialQuantizer):
         for _q in quantizer:
@@ -125,10 +130,212 @@ def _iter_leaf_quantizers(quantizer):
     yield quantizer
 
 
+def _count_moe_amax_status(model: nn.Module) -> tuple[int, int]:
+    total = 0
+    missing = 0
+    for module in model.modules():
+        if isinstance(module, QuantModule) and _has_expert_parallelism(module):
+            for child in module.children():
+                if not isinstance(child, (TensorQuantizer, SequentialQuantizer)):
+                    continue
+                for leaf_quantizer in _iter_leaf_quantizers(child):
+                    if _is_block_quantizer(leaf_quantizer):
+                        continue
+                    total += 1
+                    missing += int(getattr(leaf_quantizer, "_amax", None) is None)
+
+    counts = torch.tensor([total, missing], dtype=torch.long)
+    if dist.is_available() and dist.is_initialized():
+        if torch.cuda.is_available():
+            counts = counts.to(torch.device("cuda", torch.cuda.current_device()))
+        dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+    return int(counts[0].item()), int(counts[1].item())
+
+
+def _check_moe_calibration_complete_batched(model: nn.Module):
+    """Raise error if non-block MoE amax is partially missing across distributed ranks."""
+    group_entries = {}
+    for module_name, module in model.named_modules():
+        if not isinstance(module, QuantModule) or not _has_expert_parallelism(module):
+            continue
+        for child_name, child in module.named_children():
+            if not isinstance(child, (TensorQuantizer, SequentialQuantizer)):
+                continue
+            for leaf_idx, leaf_quantizer in enumerate(_iter_leaf_quantizers(child)):
+                if _is_block_quantizer(leaf_quantizer):
+                    continue
+                has_amax = int(getattr(leaf_quantizer, "_amax", None) is not None)
+                quantizer_name = f"{module_name}.{child_name}[{leaf_idx}]"
+                for group in [
+                    module.parallel_state.data_parallel_group,
+                    module.parallel_state.expert_model_parallel_group,
+                    module.parallel_state.tensor_parallel_group,
+                ]:
+                    if not group.is_initialized() or group.world_size() <= 1:
+                        continue
+                    group_key = id(group.group)
+                    group_entries.setdefault(group_key, [group, [], []])
+                    group_entries[group_key][1].append(has_amax)
+                    group_entries[group_key][2].append(quantizer_name)
+
+    for group, flags, names in group_entries.values():
+        lengths = DistributedProcessGroup.get_dist_syncd_obj(len(flags), group, lambda objs: objs)
+        if len(set(lengths)) != 1:
+            raise RuntimeError(
+                "MoE calibration completeness check saw different quantizer counts across "
+                f"distributed ranks: {lengths}"
+            )
+
+        device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if torch.cuda.is_available()
+            else torch.device("cpu")
+        )
+        local_flags = torch.tensor(flags, dtype=torch.int32, device=device)
+        min_flags = local_flags.clone()
+        max_flags = local_flags.clone()
+        dist.all_reduce(min_flags, op=dist.ReduceOp.MIN, group=group.group)
+        dist.all_reduce(max_flags, op=dist.ReduceOp.MAX, group=group.group)
+
+        partial_missing = min_flags != max_flags
+        if partial_missing.any():
+            missing_idx = partial_missing.nonzero(as_tuple=False).flatten()[:8].tolist()
+            examples = [names[idx] for idx in missing_idx]
+            raise RuntimeError(
+                "MoE calibration incomplete: some experts received no tokens during "
+                "calibration. Increase --calib-size to ensure all experts see calibration "
+                f"data. Example partially missing quantizers: {examples}"
+            )
+
+
+def _iter_amax_quantizers(model: nn.Module, include_block: bool = False, require_amax: bool = True):
+    for module in model.modules():
+        if not isinstance(module, QuantModule):
+            continue
+        for child_name, child in module.named_children():
+            if not isinstance(child, (TensorQuantizer, SequentialQuantizer)):
+                continue
+            for leaf_quantizer in _iter_leaf_quantizers(child):
+                if not include_block and _is_block_quantizer(leaf_quantizer):
+                    continue
+                if not require_amax or getattr(leaf_quantizer, "_amax", None) is not None:
+                    yield leaf_quantizer, module.parallel_state, child_name
+
+
+def _should_sync_amax_across_ep(entry, sync_expert_weight_amax: bool) -> bool:
+    quantizer, _, quantizer_name = entry
+    if not _is_block_quantizer(quantizer):
+        return True
+    if "input_quantizer" in quantizer_name:
+        return True
+    return sync_expert_weight_amax and "weight_quantizer" in quantizer_name
+
+
+def _check_amax_entries_complete_batched(entries, get_group, group_name: str) -> None:
+    """Raise error if some ranks would enter an amax sync while peers would skip it."""
+    grouped_entries = {}
+    for entry in entries:
+        quantizer, parallel_state = entry[:2]
+        quantizer_name = entry[2] if len(entry) > 2 else type(quantizer).__name__
+        group = get_group(parallel_state)
+        if not group.is_initialized() or group.world_size() <= 1:
+            continue
+
+        group_key = id(group.group)
+        grouped_entries.setdefault(group_key, [group, [], []])
+        grouped_entries[group_key][1].append(int(getattr(quantizer, "_amax", None) is not None))
+        grouped_entries[group_key][2].append(quantizer_name)
+
+    for group, flags, names in grouped_entries.values():
+        lengths = DistributedProcessGroup.get_dist_syncd_obj(len(flags), group, lambda objs: objs)
+        if len(set(lengths)) != 1:
+            raise RuntimeError(
+                f"{group_name} amax sync saw different quantizer counts across distributed "
+                f"ranks: {lengths}"
+            )
+
+        device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if torch.cuda.is_available()
+            else torch.device("cpu")
+        )
+        local_flags = torch.tensor(flags, dtype=torch.int32, device=device)
+        min_flags = local_flags.clone()
+        max_flags = local_flags.clone()
+        dist.all_reduce(min_flags, op=dist.ReduceOp.MIN, group=group.group)
+        dist.all_reduce(max_flags, op=dist.ReduceOp.MAX, group=group.group)
+
+        partial_missing = min_flags != max_flags
+        if partial_missing.any():
+            missing_idx = partial_missing.nonzero(as_tuple=False).flatten()[:8].tolist()
+            examples = [names[idx] for idx in missing_idx]
+            raise RuntimeError(
+                f"{group_name} amax sync incomplete: some ranks have quantizer amax while "
+                "peers do not. Increase --calib-size if this is an MoE routing sparsity "
+                f"issue. Example partially missing quantizers: {examples}"
+            )
+
+
+def _sync_amax_entries_batched(entries, get_group) -> tuple[int, int, int]:
+    """Synchronize amax tensors with one MAX all-reduce per group/device/dtype."""
+    grouped_entries = {}
+    for entry in entries:
+        quantizer, parallel_state = entry[:2]
+        group = get_group(parallel_state)
+        if not group.is_initialized() or group.world_size() <= 1:
+            continue
+
+        amax = getattr(quantizer, "_amax", None)
+        if amax is None:
+            continue
+
+        key = (
+            id(group.group),
+            amax.device.type,
+            amax.device.index if amax.is_cuda else -1,
+            amax.dtype,
+        )
+        grouped_entries.setdefault(key, [group, []])[1].append(quantizer)
+
+    synced_quantizers = 0
+    synced_elements = 0
+    collectives = 0
+    for group, quantizers in grouped_entries.values():
+        amax_tensors = [quantizer._amax for quantizer in quantizers]
+        device = amax_tensors[0].device
+        num_elements = sum(tensor.numel() for tensor in amax_tensors)
+        metadata = torch.tensor([len(amax_tensors), num_elements], dtype=torch.long, device=device)
+        metadata_min = metadata.clone()
+        metadata_max = metadata.clone()
+        dist.all_reduce(metadata_min, op=dist.ReduceOp.MIN, group=group.group)
+        dist.all_reduce(metadata_max, op=dist.ReduceOp.MAX, group=group.group)
+        if not torch.equal(metadata_min, metadata_max):
+            raise RuntimeError(
+                "Cannot batch-sync quantizer amax because distributed ranks saw different "
+                "quantizer counts or element counts: "
+                f"min={tuple(metadata_min.tolist())}, max={tuple(metadata_max.tolist())}"
+            )
+
+        flat_amax = torch.cat([tensor.contiguous().view(-1) for tensor in amax_tensors])
+        dist.all_reduce(flat_amax, op=dist.ReduceOp.MAX, group=group.group)
+
+        offset = 0
+        for tensor in amax_tensors:
+            numel = tensor.numel()
+            tensor.data.copy_(flat_amax[offset : offset + numel].view_as(tensor))
+            offset += numel
+
+        synced_quantizers += len(amax_tensors)
+        synced_elements += num_elements
+        collectives += 1
+
+    return synced_quantizers, synced_elements, collectives
+
+
 def _check_moe_calibration_complete(quantizer, parallel_state):
     """Raise error if MoE calibration is incomplete across distributed MoE ranks."""
     for leaf_quantizer in _iter_leaf_quantizers(quantizer):
-        if _is_dynamic_block_quantizer(leaf_quantizer):
+        if _is_block_quantizer(leaf_quantizer):
             continue
 
         has_amax = getattr(leaf_quantizer, "_amax", None) is not None
@@ -169,17 +376,29 @@ def max_calibrate(
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
     """
+    start_time = time.perf_counter()
     enable_stats_collection(model)
     if forward_loop is None:
         weight_only_quantize(model)
     else:
         forward_loop(model)
     finish_stats_collection(model)
+    print_rank_0(
+        f"[modelopt-calib] max_calibrate forward/stats: {time.perf_counter() - start_time:.2f}s"
+    )
 
     # Sync quantizer amax across local experts within each rank (for SequentialMLP)
+    local_sync_time = time.perf_counter()
     for name, module in model.named_modules():
         if hasattr(module, "layer_sync_moe_local_experts_amax"):
             module.layer_sync_moe_local_experts_amax(sync_weight_amax=sync_expert_weight_amax)
+    print_rank_0(
+        f"[modelopt-calib] max_calibrate local MoE sync: {time.perf_counter() - local_sync_time:.2f}s"
+    )
+
+    # Promote eligible static-block NVFP4 weight quantizers after max stats are
+    # populated so static MSE checkpoints keep their saved block scales.
+    promote_nvfp4_static_quantizers(model)
 
     # Promote eligible static-block NVFP4 weight quantizers to NVFP4StaticQuantizer
     # so the static blockwise fake-quant path is used in forward and the export
@@ -193,30 +412,46 @@ def max_calibrate(
     if not distributed_sync:
         return
 
-    # Check MoE calibration completeness before sync
-    for name, module in model.named_modules():
-        if isinstance(module, QuantModule) and _has_expert_parallelism(module):
-            for child in module.children():
-                if isinstance(child, (TensorQuantizer, SequentialQuantizer)):
-                    _check_moe_calibration_complete(child, module.parallel_state)
+    total_moe_amax, missing_moe_amax = _count_moe_amax_status(model)
+    print_rank_0(
+        f"[modelopt-calib] max_calibrate MoE non-block amax status: "
+        f"missing={missing_moe_amax}, total={total_moe_amax}"
+    )
 
-    def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state):
-        """Synchronize the amax across all ranks in the data parallel and expert parallel groups."""
-        for leaf_quantizer in _iter_leaf_quantizers(quantizer):
-            if _is_dynamic_block_quantizer(leaf_quantizer):
-                continue
-            leaf_quantizer.sync_amax_across_distributed_group(parallel_state.data_parallel_group)
-            leaf_quantizer.sync_amax_across_distributed_group(
-                parallel_state.expert_model_parallel_group
-            )
-        # TODO: create sync_bias_across_distributed_group
+    # Check MoE calibration completeness before sync
+    completeness_time = time.perf_counter()
+    _check_moe_calibration_complete_batched(model)
+    print_rank_0(
+        f"[modelopt-calib] max_calibrate MoE completeness check: {time.perf_counter() - completeness_time:.2f}s"
+    )
 
     # Step 2:Sync amax across data parallelism
-    for name, module in model.named_modules():
-        if isinstance(module, QuantModule):
-            for child in module.children():
-                if isinstance(child, (TensorQuantizer, SequentialQuantizer)):
-                    sync_quantizer_amax_across_dp_ep(child, module.parallel_state)
+    dp_ep_sync_time = time.perf_counter()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    all_amax_entries = list(_iter_amax_quantizers(model, include_block=True, require_amax=False))
+    ep_amax_entries = [
+        entry
+        for entry in all_amax_entries
+        if _should_sync_amax_across_ep(entry, sync_expert_weight_amax)
+    ]
+    _check_amax_entries_complete_batched(
+        all_amax_entries, lambda parallel_state: parallel_state.data_parallel_group, "DP"
+    )
+    _check_amax_entries_complete_batched(
+        ep_amax_entries, lambda parallel_state: parallel_state.expert_model_parallel_group, "EP"
+    )
+    dp_quantizers, dp_elements, dp_collectives = _sync_amax_entries_batched(
+        all_amax_entries, lambda parallel_state: parallel_state.data_parallel_group
+    )
+    ep_quantizers, ep_elements, ep_collectives = _sync_amax_entries_batched(
+        ep_amax_entries, lambda parallel_state: parallel_state.expert_model_parallel_group
+    )
+    print_rank_0(
+        f"[modelopt-calib] max_calibrate DP/EP amax sync: {time.perf_counter() - dp_ep_sync_time:.2f}s "
+        f"(dp_quantizers={dp_quantizers}, dp_elements={dp_elements}, dp_collectives={dp_collectives}, "
+        f"ep_quantizers={ep_quantizers}, ep_elements={ep_elements}, ep_collectives={ep_collectives})"
+    )
     # Step 3: TP sync
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same
 
@@ -229,50 +464,78 @@ def max_calibrate(
     #   activations:  TPG should have the same amax if axis in [None]
     #   weights:      TPG should have the same amax if axis in [None, 0]
 
-    def sync_quantizer_amax_across_tp(
+    def should_sync_quantizer_amax_across_tp(
         quantizer: TensorQuantizer | SequentialQuantizer,
         linear_name: str,
         quantizer_type: str,
         axes_for_sync: list,
-        parallel_state: ParallelState,
+        sync_static_block_amax: bool = False,
     ):
-        # Syncing amax across TP for sequential quantizer
         if isinstance(quantizer, SequentialQuantizer):
-            for _q in quantizer:
-                # Syncing amax across TP for sequential quantizer
-                sync_quantizer_amax_across_tp(
-                    _q, linear_name, quantizer_type, axes_for_sync, parallel_state
+            return any(
+                should_sync_quantizer_amax_across_tp(
+                    _q, linear_name, quantizer_type, axes_for_sync, sync_static_block_amax
                 )
-            return
-        # sync is not needed for block quantization
+                for _q in quantizer
+            )
+
         if quantizer.block_sizes is not None:
             if hasattr(quantizer, "_padding"):
                 warnings.warn(
                     f"Found block-quantized padded {quantizer_type} for {linear_name}, amax will"
                     " not be synced correctly."
                 )
-            # Skip amax sync for INT4 / W4A8 block quantization
-            # Sync amax for NVFP4 (dynamic per-block, static per-tensor quantized scale)
             if _is_dynamic_block_quantizer(quantizer):
-                return
+                return True
+            return sync_static_block_amax
 
-        if quantizer.axis in axes_for_sync and quantizer.amax is not None:
-            quantizer.sync_amax_across_distributed_group(parallel_state.tensor_parallel_group)
+        return quantizer.axis in axes_for_sync
+
+    def add_quantizer_amax_sync_entries_across_tp(
+        entries: list,
+        quantizer: TensorQuantizer | SequentialQuantizer,
+        linear_name: str,
+        quantizer_type: str,
+        axes_for_sync: list,
+        parallel_state: ParallelState,
+        sync_static_block_amax: bool = False,
+    ):
+        if isinstance(quantizer, SequentialQuantizer):
+            for _q in quantizer:
+                add_quantizer_amax_sync_entries_across_tp(
+                    entries,
+                    _q,
+                    linear_name,
+                    quantizer_type,
+                    axes_for_sync,
+                    parallel_state,
+                    sync_static_block_amax,
+                )
+            return
+        if should_sync_quantizer_amax_across_tp(
+            quantizer, linear_name, quantizer_type, axes_for_sync, sync_static_block_amax
+        ):
+            entries.append((quantizer, parallel_state, f"{linear_name}.{quantizer_type}"))
 
     # Step 2: Sync amax across relevant parallelism (such as TP / EP)
+    tp_sync_time = time.perf_counter()
+    tp_amax_entries = []
     for name, module in model.named_modules():
         if getattr(module, "_parallel_state", None) is None:
             continue
 
         if is_quantized_column_parallel_linear(module):
-            sync_quantizer_amax_across_tp(
+            add_quantizer_amax_sync_entries_across_tp(
+                tp_amax_entries,
                 module.input_quantizer,
                 name,
                 "input_quantizer",
                 axes_for_sync=[None, -1],
                 parallel_state=module.parallel_state,
+                sync_static_block_amax=True,
             )
-            sync_quantizer_amax_across_tp(
+            add_quantizer_amax_sync_entries_across_tp(
+                tp_amax_entries,
                 module.weight_quantizer,
                 name,
                 "weight_quantizer",
@@ -281,7 +544,8 @@ def max_calibrate(
             )
 
         if is_quantized_row_parallel_linear(module):
-            sync_quantizer_amax_across_tp(
+            add_quantizer_amax_sync_entries_across_tp(
+                tp_amax_entries,
                 module.input_quantizer,
                 name,
                 "input_quantizer",
@@ -289,7 +553,8 @@ def max_calibrate(
                 parallel_state=module.parallel_state,
             )
 
-            sync_quantizer_amax_across_tp(
+            add_quantizer_amax_sync_entries_across_tp(
+                tp_amax_entries,
                 module.weight_quantizer,
                 name,
                 "weight_quantizer",
@@ -301,11 +566,22 @@ def max_calibrate(
         if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
             # We only support KVCache quantization with scalar per-tensor states for now (NVFP4 & FP8 KV cache)
             # So we should sync amax across DP and TP for these quantizers (DP is already synced from above)
-            for quantizer in [module.k_bmm_quantizer, module.v_bmm_quantizer]:
-                if isinstance(quantizer, TensorQuantizer) and quantizer.amax is not None:
-                    quantizer.sync_amax_across_distributed_group(
-                        module.parallel_state.tensor_parallel_group
-                    )
+            tp_amax_entries.extend(
+                (quantizer, module.parallel_state, f"{name}.kv_cache")
+                for quantizer in [module.k_bmm_quantizer, module.v_bmm_quantizer]
+                if isinstance(quantizer, TensorQuantizer)
+            )
+
+    _check_amax_entries_complete_batched(
+        tp_amax_entries, lambda parallel_state: parallel_state.tensor_parallel_group, "TP"
+    )
+    tp_quantizers, tp_elements, tp_collectives = _sync_amax_entries_batched(
+        tp_amax_entries, lambda parallel_state: parallel_state.tensor_parallel_group
+    )
+    print_rank_0(
+        f"[modelopt-calib] max_calibrate TP/KV amax sync: {time.perf_counter() - tp_sync_time:.2f}s "
+        f"(tp_quantizers={tp_quantizers}, tp_elements={tp_elements}, tp_collectives={tp_collectives})"
+    )
 
 
 def _mse_quant_func(x, amax, quantizer):
@@ -481,6 +757,126 @@ def mse_calibrate(
         for dev_id in range(torch.cuda.device_count()):
             torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
         torch.cuda.empty_cache()
+
+    # Step 4: Validate that every weight quantizer we touched has a sane
+    # ``_amax`` (and ``_global_amax`` for static NVFP4 quantizers) registered
+    # as a persistent buffer. We've observed two failure modes that this catch
+    # is meant to fix in-place at calibration time:
+    #
+    #   1. ``MaxCalibrator.collect`` has a meta-device fast path that stores a
+    #      meta tensor as ``_calib_amax`` (used during model construction for
+    #      shape inference). If the quantizer is never called again on real
+    #      data (e.g., a routed expert that receives no calibration tokens),
+    #      ``load_calib_amax`` registers a meta-device buffer, which becomes
+    #      uninitialized FP32 memory after ``to_empty`` materialization —
+    #      observed as ``_amax=[-1e37, ...]`` in routed-expert quantizers.
+    #
+    #   2. The ``hasattr(module, "_amax")`` guard in step 2 silently skips
+    #      quantizers that were never max-calibrated, leaving them in an
+    #      inconsistent state where ``compute_amax`` later returns a value but
+    #      the buffer registration shape/device may not match what export and
+    #      restore expect.
+    #
+    # In both cases the saved checkpoint poisons MCore generation (with
+    # garbage but bounded values) and breaks vLLM serving (NaN logits). Fix
+    # both by recomputing per-block amax directly from the weight tensor and
+    # registering as a persistent CPU/CUDA buffer.
+    def _amax_is_invalid(t: torch.Tensor | None) -> bool:
+        if t is None:
+            return True
+        if t.device.type == "meta":
+            return True
+        if not torch.is_floating_point(t):
+            return False
+        return bool(torch.any(~torch.isfinite(t)).item() or torch.any(t < 0).item())
+
+    def _why_invalid(t: torch.Tensor | None) -> str:
+        if t is None:
+            return "missing"
+        if t.device.type == "meta":
+            return "meta-device"
+        if not torch.is_floating_point(t):
+            return "ok"
+        if torch.any(~torch.isfinite(t)).item():
+            return "non-finite (nan/inf)"
+        if torch.any(t < 0).item():
+            return f"contains negative values (min={t.min().item():.3g})"
+        return "ok"
+
+    repaired = 0
+    for parent_module, weight_name, weight_quantizer in weight_quantizers:
+        weight = getattr(parent_module, weight_name, None)
+        if weight is None or weight.device.type == "meta":
+            continue
+        wq = (
+            weight_quantizer[0]
+            if isinstance(weight_quantizer, SequentialQuantizer)
+            else weight_quantizer
+        )
+
+        amax = getattr(wq, "_amax", None)
+        global_amax = getattr(wq, "_global_amax", None)
+        amax_bad = _amax_is_invalid(amax)
+        global_bad = isinstance(wq, NVFP4StaticQuantizer) and _amax_is_invalid(global_amax)
+        if not amax_bad and not global_bad:
+            continue
+
+        # Build a per-quantizer warning so the failure is visible in PTQ logs
+        # rather than hidden until export. Recovery is the same path
+        # `_ensure_weight_quantizer_calibrated` would take at export time:
+        # max-calibration on the actual weight tensor.
+        reasons = []
+        if amax_bad:
+            reasons.append(f"_amax {_why_invalid(amax)}")
+        if global_bad:
+            reasons.append(f"_global_amax {_why_invalid(global_amax)}")
+        qname = type(parent_module).__name__ + "." + weight_name
+        warnings.warn(
+            f"mse_calibrate: weight quantizer for {qname} has invalid state "
+            f"after MSE calibration ({', '.join(reasons)}). Falling back to "
+            f"max-calibration on the weight tensor (same path as export-time "
+            f"_ensure_weight_quantizer_calibrated). Likely cause: this "
+            f"quantizer was never calibrated with real data, or its buffer "
+            f"was registered on the meta device during model construction "
+            f"and never overwritten."
+        )
+
+        block_sizes = getattr(wq, "block_sizes", None)
+        block_size = block_sizes.get(-1) if isinstance(block_sizes, dict) else None
+
+        if isinstance(wq, NVFP4StaticQuantizer) and block_size is not None:
+            per_block_amax = reduce_block_amax(
+                weight.detach().float(), block_sizes={-1: block_size}
+            ).to(weight.device)
+            if amax_bad:
+                if hasattr(wq, "_amax"):
+                    delattr(wq, "_amax")
+                wq.register_buffer("_amax", per_block_amax.detach().clone())
+            if global_bad:
+                wq.global_amax = per_block_amax.max().detach()
+            repaired += 1
+        else:
+            # Non-static (or non-block) quantizer: rerun the standard load_calib_amax
+            # path on the weight tensor.
+            wq.reset_amax()
+            wq.disable_quant()
+            wq.enable_calib()
+            wq(weight.detach())
+            wq.enable_quant()
+            wq.disable_calib()
+            cal = getattr(wq, "_calibrator", None)
+            if cal is not None and cal.compute_amax() is not None:
+                wq.load_calib_amax()
+            if cal is not None and hasattr(cal, "reset"):
+                cal.reset()
+            repaired += 1
+
+    if repaired:
+        print_rank_0(
+            f"[modelopt-calib] mse_calibrate: repaired {repaired} weight quantizers "
+            "with missing/invalid amax (recomputed from the weight tensor via "
+            "max-calibration). See per-quantizer warnings above for details."
+        )
 
     # TODO: Sync amax across distributed processes
 

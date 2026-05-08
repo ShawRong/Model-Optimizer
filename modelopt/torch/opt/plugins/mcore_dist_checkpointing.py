@@ -37,6 +37,24 @@ from modelopt.torch.utils.network import SUPPORTED_WRAPPERS
 SUPPORTED_WRAPPERS[Float16Module] = "module"
 
 
+_RESTORE_DEBUG_ENV_VARS = ("MODELOPT_MCORE_RESTORE_DEBUG", "MODELOPT_NVFP4_STATIC_DEBUG")
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _restore_debug(message: str) -> None:
+    """Print opt-in restore diagnostics for MCore distributed checkpoints."""
+    if not any(
+        os.environ.get(env, "").lower() in _TRUE_ENV_VALUES for env in _RESTORE_DEBUG_ENV_VARS
+    ):
+        return
+    rank = "?"
+    world = "?"
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        rank = str(torch.distributed.get_rank())
+        world = str(torch.distributed.get_world_size())
+    print(f"[modelopt-mcore-restore-debug rank {rank}/{world}] {message}", flush=True)
+
+
 def remove_per_module_state(
     modelopt_state: dict[str, Any],
 ) -> None:
@@ -159,18 +177,28 @@ def _load_extra_state_from_sharded_checkpoint(
     """
     sharded_state_dict = model.sharded_state_dict(prefix=prefix)
     extra_sharded_state_dict = {k: v for k, v in sharded_state_dict.items() if "_extra_state" in k}
+    _restore_debug(
+        f"load_extra_state start checkpoint={checkpoint_name} num_extra_keys={len(extra_sharded_state_dict)}"
+    )
     extra_state_dict = dist_checkpointing.load(
         extra_sharded_state_dict,
         checkpoint_name,
         get_default_load_sharded_strategy(checkpoint_name),
         strict=StrictHandling.LOG_UNEXPECTED,
     )
+    _restore_debug(
+        f"load_extra_state dist_checkpointing.load done num_loaded={len(extra_state_dict)}"
+    )
     extra_state_dict_no_prefix = {}
 
     for k, v in extra_state_dict.items():
         if k.startswith(prefix):
             extra_state_dict_no_prefix[k[len(prefix) :]] = v
-    model.load_state_dict(extra_state_dict_no_prefix, strict=False)
+    incompatible = model.load_state_dict(extra_state_dict_no_prefix, strict=False)
+    _restore_debug(
+        "load_extra_state load_state_dict done "
+        f"missing={len(incompatible.missing_keys)} unexpected={len(incompatible.unexpected_keys)}"
+    )
 
 
 def restore_sharded_modelopt_state(
@@ -196,15 +224,22 @@ def restore_sharded_modelopt_state(
         raise ValueError("sharded_modelopt_state does not support virtual pipeline parallel!")
 
     modelopt_checkpoint_name = f"{checkpoint_name}/modelopt_state"
+    _restore_debug(f"restore_sharded_modelopt_state enter checkpoint={checkpoint_name}")
 
     # Early return if the model already has a modelopt_state or the checkpoint does not exist.
     if not os.path.exists(modelopt_checkpoint_name) or mto.ModeloptStateManager.is_converted(
         model[0]
     ):
+        _restore_debug(
+            "restore_sharded_modelopt_state skip: no modelopt_state or already converted"
+        )
         return
 
     # Loading the common modelopt_state (replicated on all ranks)
+    _restore_debug(f"safe_load common modelopt_state start path={modelopt_checkpoint_name}")
     common_modelopt_state = safe_load(modelopt_checkpoint_name + "/" + COMMON_STATE_FNAME)
+    modes = [mode for mode, _ in common_modelopt_state.get("modelopt_state_dict", [])]
+    _restore_debug(f"safe_load common modelopt_state done modes={modes}")
 
     modelopt_load_version = common_modelopt_state["modelopt_version"]
 
@@ -219,6 +254,8 @@ def restore_sharded_modelopt_state(
     #    Modes are restored in order. Modes with per-module state stored as
     #    extra_state are partially restored (stop at DynamicModule replacement)
     #
+    _restore_debug("restore_from_modelopt_state start")
     model[0] = mto.restore_from_modelopt_state(model[0], common_modelopt_state)
+    _restore_debug("restore_from_modelopt_state done")
 
     _load_extra_state_from_sharded_checkpoint(model[0], checkpoint_name, prefix, metadata=metadata)

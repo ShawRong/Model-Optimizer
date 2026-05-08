@@ -133,10 +133,15 @@ class NVFP4QTensor(BaseQuantizedTensor):
             per_block_scale = per_block_scale.view(expected_shape)
 
             # Quantize scales to FP8. Saturate to the fp8_e4m3fn max (448) before the
-            # cast: when the [==0]=1.0 safety net above fires (per_block_amax was zero
-            # for an all-zero weight block) and global_amax is small, the pre-cast value
-            # explodes to ``1.0 * 448 / (global_amax/6)``. fp8_e4m3fn has no Inf, so any
-            # value >= 480 casts to NaN — clamp first to keep the stored byte finite.
+            # cast. Two scenarios produce a pre-cast value > 480 (which would round to
+            # NaN since fp8_e4m3fn has no Inf): (1) the [==0]=1.0 safety net above fires
+            # for an all-zero weight block when global_amax is small, giving
+            # ``1.0 * 448 / (global_amax/6)``; (2) MSE picks _amax > _global_amax. The
+            # in-place clamp keeps the stored byte finite. Do not clamp from below:
+            # underflow should round to FP8 byte 0 so this path matches the dynamic
+            # path. With a positive lower clamp, tiny-amax blocks would land on a
+            # subnormal FP8 byte and diverge from the dynamic export for the same
+            # global_amax.
             if not keep_high_precision:
                 per_block_scale = (
                     (per_block_scale * 448.0 / per_block_scale_max)
