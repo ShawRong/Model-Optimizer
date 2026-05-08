@@ -1431,6 +1431,8 @@ class SequentialQuantizer(nn.Sequential):
         if not isinstance(attributes, (list, tuple)):
             assert isinstance(attributes, Mapping), "attributes must be a list or a mapping."
             attributes = [attributes] * len(self)
+        elif len(attributes) != len(self):
+            raise ValueError(f"Expected {len(self)} attribute configs, but got {len(attributes)}.")
 
         for attribute, quantizer in zip(attributes, self):
             quantizer.set_from_attribute_config(attribute)

@@ -126,6 +126,9 @@ def test_quantizer_cfg_entry_mutable_mapping_delitem_unsets_field():
         "enable": True,
     }
 
+    with pytest.raises(KeyError):
+        del entry["missing"]
+
 
 def test_public_preset_quant_cfg_entries_are_typed_and_dict_like():
     """Public preset constants are typed but keep dict-style entry access."""
@@ -175,6 +178,22 @@ def test_mixed_raw_dict_and_modelopt_config_entries_normalize_after_mutation():
     renormalized = normalize_quant_cfg_list(normalized)
     weight_entry = find_quant_cfg_entry_by_path(renormalized, "*weight_quantizer")
     assert weight_entry["cfg"]["num_bits"] == "e4m3"
+
+
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        ({"quantizer_name": "*", "cfg": None}, "'?cfg'? must be omitted"),
+        ({"quantizer_name": "*", "enable": None}, "'?enable'? must be a boolean"),
+    ],
+)
+def test_quantizer_cfg_entry_rejects_explicit_null_values(raw, match):
+    """Explicit null cfg/enable values are rejected instead of treated as omitted."""
+    with pytest.raises(ValidationError, match=match):
+        QuantizerCfgEntry.model_validate(raw)
+
+    with pytest.raises(ValueError, match=match):
+        normalize_quant_cfg_list([raw])
 
 
 def test_quantizer_cfg_entry_rejects_no_effect_entry():
@@ -467,6 +486,26 @@ class TestNormalizeQuantCfgList:
         assert result[0]["parent_class"] == "nn.Linear"
         assert result[0]["quantizer_name"] == "*weight_quantizer"
         assert _cfg_to_dict(result[0]["cfg"]) == {"num_bits": 4, "axis": 0}
+        assert result[0]["enable"] is True
+
+    def test_legacy_nn_class_with_list_valued_cfg(self):
+        """Legacy nn.* scoped format preserves list-valued SequentialQuantizer cfg."""
+        raw = [
+            {
+                "nn.Linear": {
+                    "*weight_quantizer": [
+                        {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                        {"num_bits": 8, "axis": 0},
+                    ]
+                }
+            }
+        ]
+        result = normalize_quant_cfg_list(raw)
+        assert len(result) == 1
+        assert result[0]["parent_class"] == "nn.Linear"
+        assert result[0]["quantizer_name"] == "*weight_quantizer"
+        assert isinstance(result[0]["cfg"], list)
+        assert _cfg_to_dict(result[0]["cfg"]) == raw[0]["nn.Linear"]["*weight_quantizer"]
         assert result[0]["enable"] is True
 
     def test_legacy_list_valued_cfg(self):

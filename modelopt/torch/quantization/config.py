@@ -561,6 +561,10 @@ class QuantizerCfgEntry(ModeloptBaseConfig):
                 "Each quant_cfg entry must specify 'cfg', 'enable', or both. "
                 "An entry with only 'quantizer_name' has no effect."
             )
+        if "cfg" in values and values["cfg"] is None:
+            raise ValueError("cfg must be omitted or a valid mapping/list, not null.")
+        if "enable" in values and values["enable"] is None:
+            raise ValueError("enable must be a boolean when provided, not null.")
 
         cfg = values.get("cfg")
         enable = values.get("enable", True)
@@ -1008,7 +1012,7 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
 
 
 QuantizerCfgListConfig = list[QuantizerCfgEntry]
-QuantizeQuantCfgInputType = Sequence[QuantizerCfgEntry | Mapping[str, Any]]
+QuantizeQuantCfgInputType = Mapping[str, Any] | Sequence[QuantizerCfgEntry | Mapping[str, Any]]
 
 _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 
@@ -1016,7 +1020,7 @@ QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
 
 
 def normalize_quant_cfg_list(
-    v: Mapping[str, Any] | list[QuantizerCfgEntry | Mapping[str, Any]],
+    v: Mapping[str, Any] | Sequence[QuantizerCfgEntry | Mapping[str, Any]],
 ) -> list[QuantizerCfgEntry]:
     """Normalize a raw quant_cfg into a list of :class:`QuantizerCfgEntry` objects.
 
@@ -1099,15 +1103,19 @@ def normalize_quant_cfg_list(
                 if isinstance(sub_cfg, QuantizerAttributeConfig):
                     enable = None
                     cfg = sub_cfg
-                else:
+                elif isinstance(sub_cfg, Mapping):
                     sub_cfg = dict(sub_cfg)
                     enable = sub_cfg.pop("enable", None)
                     cfg = sub_cfg or None
+                else:
+                    enable = None
+                    cfg = sub_cfg
                 entry: dict[str, Any] = {
                     "parent_class": key,
                     "quantizer_name": q_path,
-                    "cfg": cfg,
                 }
+                if cfg is not None:
+                    entry["cfg"] = cfg
                 if enable is not None:
                     entry["enable"] = enable
                 entries.append(entry)
@@ -1119,7 +1127,9 @@ def normalize_quant_cfg_list(
             else:
                 cfg = value
                 enable = None
-            entry = {"quantizer_name": key, "cfg": cfg}
+            entry = {"quantizer_name": key}
+            if cfg is not None:
+                entry["cfg"] = cfg
             if enable is not None:
                 entry["enable"] = enable
             return [entry]
@@ -1165,6 +1175,17 @@ def normalize_quant_cfg_list(
             # Validate: when cfg is present and enable=True, cfg must be a non-empty
             # dict or list.  An empty cfg would attempt to create a
             # QuantizerAttributeConfig with no actual configuration.
+            if "cfg" in entry and entry["cfg"] is None:
+                raise ValueError(
+                    f"Invalid quant_cfg entry: {raw!r} - 'cfg' must be omitted or a "
+                    "valid mapping/list, not null."
+                )
+            if "enable" in entry and entry["enable"] is None:
+                raise ValueError(
+                    f"Invalid quant_cfg entry: {raw!r} - 'enable' must be a boolean "
+                    "when provided, not null."
+                )
+
             cfg = entry.get("cfg")
             enable = entry.get("enable", True)
             if enable and cfg is not None:
@@ -1190,9 +1211,8 @@ def normalize_quant_cfg_list(
                         "explicitly."
                     )
 
-            # Normalize: make enable and cfg always explicit.
+            # Normalize: make enable explicit. cfg remains omitted when it is intentionally unset.
             entry.setdefault("enable", True)
-            entry.setdefault("cfg", None)
 
             result.append(QuantizerCfgEntry.model_validate(entry))
     return result
@@ -1200,6 +1220,18 @@ def normalize_quant_cfg_list(
 
 class QuantizeConfig(ModeloptBaseConfig):
     """Default configuration for ``quantize`` mode."""
+
+    def model_dump(self, **kwargs):
+        """Dump quant_cfg entries without unset optional fields."""
+        data = super().model_dump(**kwargs)
+        if "quant_cfg" in data:
+            data["quant_cfg"] = [
+                entry.model_dump(exclude_unset=True)
+                if isinstance(entry, QuantizerCfgEntry)
+                else {k: v for k, v in entry.items() if v is not None}
+                for entry in self.quant_cfg
+            ]
+        return data
 
     quant_cfg: QuantizerCfgListConfig = ModeloptField(
         default=[{"quantizer_name": "*", "cfg": {"num_bits": 8, "axis": None}}],

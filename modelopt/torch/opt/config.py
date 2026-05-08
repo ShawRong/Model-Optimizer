@@ -119,7 +119,10 @@ class ModeloptBaseConfig(BaseModel, MutableMapping[str, Any]):
 
     def __delitem__(self, key: str) -> None:
         """Unset the given key so exclude_unset dumps omit it."""
-        field_name = self.get_field_name_from_key(key)
+        try:
+            field_name = self.get_field_name_from_key(key)
+        except AttributeError as e:
+            raise KeyError(key) from e
         if field_name in self._iterable_model_extra:
             assert self.model_extra is not None
             del self.model_extra[field_name]
@@ -129,8 +132,8 @@ class ModeloptBaseConfig(BaseModel, MutableMapping[str, Any]):
         field_info = type(self).model_fields[field_name]
         default = field_info.get_default(call_default_factory=True)
         if default is PydanticUndefined:
-            raise AttributeError(f"Key {key} cannot be unset because it has no default.")
-        setattr(self, field_name, default)
+            raise KeyError(f"Key {key} cannot be unset because it has no default.")
+        self.__dict__[field_name] = default
         self.model_fields_set.discard(field_name)
 
     def get(self, key: str, default: Any = None) -> Any:

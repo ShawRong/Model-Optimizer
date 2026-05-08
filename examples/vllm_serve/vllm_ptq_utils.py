@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
@@ -119,7 +119,11 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
         return kv_quant_cfg
 
     kv_entry = next(
-        (e for e in kv_quant_cfg if e.get("quantizer_name") == "*[kv]_bmm_quantizer"),
+        (
+            e
+            for e in kv_quant_cfg
+            if isinstance(e, Mapping) and e.get("quantizer_name") == "*[kv]_bmm_quantizer"
+        ),
         None,
     )
     if kv_entry is not None:

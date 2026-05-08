@@ -42,7 +42,7 @@ from transformers import (
     ProcessorMixin,
 )
 
-from modelopt.torch.quantization.config import QuantizeConfig
+from modelopt.torch.quantization.config import QuantizeConfig, QuantizerCfgEntry
 
 try:
     from huggingface_hub import snapshot_download
@@ -249,10 +249,14 @@ def build_quant_cfg(
 
     if model_type == "phi4mm":
         # Only quantize the language model
-        quant_cfg_obj["quant_cfg"].append({"quantizer_name": "*speech*", "enable": False})
-        quant_cfg_obj["quant_cfg"].append({"quantizer_name": "*audio*", "enable": False})
-        quant_cfg_obj["quant_cfg"].append({"quantizer_name": "*image*", "enable": False})
-        quant_cfg_obj["quant_cfg"].append({"quantizer_name": "*vision*", "enable": False})
+        quant_cfg_obj["quant_cfg"].extend(
+            [
+                QuantizerCfgEntry(quantizer_name="*speech*", enable=False),
+                QuantizerCfgEntry(quantizer_name="*audio*", enable=False),
+                QuantizerCfgEntry(quantizer_name="*image*", enable=False),
+                QuantizerCfgEntry(quantizer_name="*vision*", enable=False),
+            ]
+        )
 
     return quant_cfg_obj
 

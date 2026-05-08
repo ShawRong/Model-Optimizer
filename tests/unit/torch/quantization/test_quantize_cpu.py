@@ -401,6 +401,12 @@ class TestSetQuantizerAttributesFull:
                 assert isinstance(module, SequentialQuantizer)
                 assert len(module) == 2
 
+    def test_sequential_quantizer_rejects_mismatched_attribute_list_length(self):
+        """SequentialQuantizer rejects partial list configs instead of silently zipping."""
+        quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+        with pytest.raises(ValueError, match="Expected 2 attribute configs, but got 1"):
+            quantizer.set_from_attribute_config([QuantizerAttributeConfig(num_bits=8)])
+
 
 def test_ordering_later_entry_overrides_earlier():
     """Later entries in quant_cfg override earlier ones for the same quantizer."""

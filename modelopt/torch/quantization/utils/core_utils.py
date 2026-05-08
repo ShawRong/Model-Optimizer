@@ -935,7 +935,7 @@ def update_quant_cfg_with_kv_cache_quant(
     inner = list(
         updated_quant_cfg.get("quant_cfg") or [QuantizerCfgEntry(quantizer_name="*", enable=False)]
     )
-    updated_quant_cfg["quant_cfg"] = inner + list(kv_cache_quant_cfg)
+    updated_quant_cfg["quant_cfg"] = inner + copy.deepcopy(list(kv_cache_quant_cfg))
 
     # Set default algorithm for kv cache quantization if not provided.
     if not updated_quant_cfg.get("algorithm"):

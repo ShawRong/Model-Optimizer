@@ -249,7 +249,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgInpu
 
     See :ref:`quant-cfg` for the full format reference and common patterns.
     """
-    quant_cfg = normalize_quant_cfg_list(list(quant_cfg))
+    quant_cfg = normalize_quant_cfg_list(quant_cfg)
 
     for entry in quant_cfg:
         quantizer_name: str = entry["quantizer_name"]
@@ -496,7 +496,7 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuan
     Yields:
         None — the context body runs with the new quantizer attributes active.
     """
-    quant_cfg = normalize_quant_cfg_list(list(quant_cfg))
+    quant_cfg = normalize_quant_cfg_list(quant_cfg)
 
     for entry in quant_cfg:
         if isinstance(entry.get("cfg"), list):
