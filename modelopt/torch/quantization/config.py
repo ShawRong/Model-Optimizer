@@ -1571,9 +1571,18 @@ MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
     "algorithm": "max",
 }
 MAMBA_MOE_NVFP4_AGGRESSIVE_MSE_CFG = {
+    # AGGRESSIVE_CFG coverage (Mamba in/out_proj, MoE local experts, attention proj
+    # via the standard disable lists), but with STATIC NVFP4 weight block_sizes so
+    # MSE actually engages on the weight quantizers. Inputs stay DYNAMIC NVFP4.
     "quant_cfg": [
         *_base_disable_all,
-        {"quantizer_name": "*weight_quantizer", "cfg": _nvfp4_cfg},
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            },
+        },
         {"quantizer_name": "*input_quantizer", "cfg": _nvfp4_cfg},
         *_default_disabled_quantizer_cfg,
         *_mamba_moe_disabled_quantizer_cfg,
