@@ -20,6 +20,7 @@ from collections.abc import Mapping
 import torch
 from torch.autograd import Function
 
+from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
 from modelopt.torch.quantization.config import FP8_DEFAULT_CFG, find_quant_cfg_entry_by_path
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
@@ -121,9 +122,18 @@ def _fp8_availability_check(module, input, args, kwargs):
     # Check quantizer presence and configuration
     if not hasattr(module, "input_quantizer") or not hasattr(module, "weight_quantizer"):
         return False
+    if not module.input_quantizer.is_enabled or not module.weight_quantizer.is_enabled:
+        return False
 
     # Check input quantizer config
-    for key, value in input_cfg.items():
+    # TODO: Move this compatibility check inside the quantizer; matching config items here
+    # is fragile and easy to break as config semantics evolve.
+    input_items = input_cfg.items
+    if isinstance(input_cfg, ModeloptBaseConfig):
+        input_items = input_cfg.explicit_items
+    for key, value in input_items():
+        if key == "enable":
+            continue
         if (
             not hasattr(module.input_quantizer, key)
             or getattr(module.input_quantizer, key) != value
@@ -131,7 +141,14 @@ def _fp8_availability_check(module, input, args, kwargs):
             return False
 
     # Check weight quantizer config
-    for key, value in weight_cfg.items():
+    # TODO: Move this compatibility check inside the quantizer; matching config items here
+    # is fragile and easy to break as config semantics evolve.
+    weight_items = weight_cfg.items
+    if isinstance(weight_cfg, ModeloptBaseConfig):
+        weight_items = weight_cfg.explicit_items
+    for key, value in weight_items():
+        if key == "enable":
+            continue
         if (
             not hasattr(module.weight_quantizer, key)
             or getattr(module.weight_quantizer, key) != value

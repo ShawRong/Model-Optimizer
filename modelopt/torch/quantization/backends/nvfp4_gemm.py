@@ -21,6 +21,7 @@ import torch
 from torch.autograd import Function
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
@@ -230,7 +231,15 @@ def _nvfp4_availability_check(module, input, args, kwargs):
         return False
 
     # Check input quantizer config
-    for key, value in input_cfg.items():
+    # TODO: Move this compatibility check inside the quantizer; matching config items here
+    # is fragile and easy to break as config semantics evolve.
+    if not module.input_quantizer.is_enabled or not module.weight_quantizer.is_enabled:
+        return False
+
+    input_items = input_cfg.items
+    if isinstance(input_cfg, ModeloptBaseConfig):
+        input_items = input_cfg.explicit_items
+    for key, value in input_items():
         if key == "enable":
             continue
         if (
@@ -240,7 +249,12 @@ def _nvfp4_availability_check(module, input, args, kwargs):
             return False
 
     # Check weight quantizer config
-    for key, value in weight_cfg.items():
+    # TODO: Move this compatibility check inside the quantizer; matching config items here
+    # is fragile and easy to break as config semantics evolve.
+    weight_items = weight_cfg.items
+    if isinstance(weight_cfg, ModeloptBaseConfig):
+        weight_items = weight_cfg.explicit_items
+    for key, value in weight_items():
         if key == "enable":
             continue
         if (
