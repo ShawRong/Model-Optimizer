@@ -374,6 +374,7 @@ def repair_sharded_modelopt_state(
     sharded_key_to_runtime_buffer: dict[str, torch.Tensor] = {}
     n_sharded_tensor = 0
     n_amax_keys = 0
+    sample_first_moe_amax_dump: list[str] = []
     for v in runtime_sd.values():
         if not isinstance(v, ShardedTensor):
             continue
@@ -383,6 +384,32 @@ def repair_sharded_modelopt_state(
             continue
         n_amax_keys += 1
         runtime_buf = v.data
+        # Stash a sample of the buffer content for the FIRST MoE local layer's
+        # expert 0 fc1 _amax — which we know empirically gets dropped by phase-2.
+        if (
+            len(sample_first_moe_amax_dump) < 4
+            and ".mlp.experts.experts.0.linear_fc1.weight_quantizer." in sharded_key
+        ):
+            try:
+                t = runtime_buf.detach()
+                if t is None:
+                    sample_first_moe_amax_dump.append(f"{sharded_key} -> None")
+                else:
+                    flat = t.float().reshape(-1)
+                    n_nan = int(torch.isnan(flat).sum().item())
+                    n_inf = int(torch.isinf(flat).sum().item())
+                    n_neg = int((flat < 0).sum().item())
+                    n_zero = int((flat == 0).sum().item())
+                    finite = flat[torch.isfinite(flat)]
+                    fmin = float(finite.min().item()) if finite.numel() else float("nan")
+                    fmax = float(finite.max().item()) if finite.numel() else float("nan")
+                    sample_first_moe_amax_dump.append(
+                        f"{sharded_key} dtype={t.dtype} shape={tuple(t.shape)} "
+                        f"nan={n_nan} inf={n_inf} neg={n_neg} zero={n_zero}/{flat.numel()} "
+                        f"fmin={fmin:.4g} fmax={fmax:.4g}"
+                    )
+            except Exception as exc:
+                sample_first_moe_amax_dump.append(f"{sharded_key} ERR: {exc!r}")
         if _quantizer_buffer_value_is_invalid(runtime_buf):
             sharded_key_to_runtime_buffer[sharded_key] = runtime_buf
 
@@ -392,6 +419,11 @@ def repair_sharded_modelopt_state(
         f"amax_keys={n_amax_keys} invalid={len(sharded_key_to_runtime_buffer)}",
         flush=True,
     )
+    for line in sample_first_moe_amax_dump:
+        print(
+            f"[modelopt][repair_sharded_modelopt_state rank {rank}] sample: {line}",
+            flush=True,
+        )
 
     if not sharded_key_to_runtime_buffer:
         return 0
