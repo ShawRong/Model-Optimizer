@@ -259,3 +259,175 @@ def restore_sharded_modelopt_state(
     _restore_debug("restore_from_modelopt_state done")
 
     _load_extra_state_from_sharded_checkpoint(model[0], checkpoint_name, prefix, metadata=metadata)
+
+
+def _quantizer_buffer_value_is_invalid(t: "torch.Tensor | None") -> bool:
+    """Return True if a quantizer ``_amax`` / ``_global_amax`` buffer is invalid.
+
+    Detects torch.empty(...) leakage that the phase-2 distcp load failed to fill:
+      - None
+      - meta-device tensor
+      - any non-finite (NaN / Inf) entry
+      - any negative entry
+    Zero is treated as valid (legitimate dead-block amax for NVFP4 static).
+    """
+    if t is None:
+        return True
+    if hasattr(t, "device") and getattr(t.device, "type", None) == "meta":
+        return True
+    if not torch.is_floating_point(t):
+        return False
+    t = t.detach()
+    return bool(torch.any(~torch.isfinite(t)).item() or torch.any(t < 0).item())
+
+
+def repair_sharded_modelopt_state(
+    model: list[torch.nn.Module],
+    checkpoint_name: str | Path,
+    prefix: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    """Re-fill quantizer buffers that the phase-2 distcp load left as ``torch.empty``.
+
+    On certain MCore PP/EP topology changes (observed: PP=1 EP=16 save reshard to
+    PP=12 EP=1 export), the second-phase ``dist_checkpointing.load`` silently
+    fails to fill the per-rank-first-MoE-local-layer expert ``_amax`` /
+    ``_global_amax`` buffers. The runtime buffers stay at uninitialized memory
+    from ``register_buffer(..., torch.empty(...))``.
+
+    This helper detects those buffers (NaN / Inf / negative content) and
+    re-issues a direct ``dist_checkpointing.load`` for just those keys, using a
+    synthetic ``ShardedTensor`` request that bypasses whatever descriptor mismatch
+    is upstream of the original phase-2 failure. It then copies the loaded values
+    into the runtime buffers, preserving the saved (e.g. MSE-calibrated) state.
+
+    Call this AFTER the main checkpoint phase-2 load completes (e.g. immediately
+    after ``dist_checkpointing.load(...)`` and ``model.load_state_dict(...)``
+    inside Megatron's checkpoint loader). It is a no-op if no buffers are
+    invalid.
+
+    Args:
+        model: the model wrapped in a list (matching restore_sharded_modelopt_state).
+        checkpoint_name: the checkpoint folder path (parent of "modelopt_state").
+        prefix: the prefix added to modelopt_state keys ("model." for NeMo).
+        metadata: distcp metadata (currently unused by this helper but kept for API
+            symmetry; future versions may need it for sharded layout decisions).
+
+    Returns:
+        Number of quantizer buffers repaired (across this rank only).
+    """
+    from megatron.core.dist_checkpointing.mapping import ShardedTensor
+    from torch.distributed.checkpoint import FileSystemReader
+
+    if len(model) != 1:
+        return 0
+    if not mto.ModeloptStateManager.is_converted(model[0]):
+        return 0
+
+    ckpt_str = str(checkpoint_name)
+
+    # Read saved metadata to know which keys exist and their shapes.
+    try:
+        reader = FileSystemReader(ckpt_str)
+        saved_md = reader.read_metadata().state_dict_metadata
+    except Exception as exc:
+        _restore_debug(f"repair_sharded_modelopt_state: cannot read .metadata: {exc}")
+        return 0
+
+    # Build the runtime sharded_state_dict so we can look up the global key
+    # for each runtime quantizer buffer (TransformerBlock + SequentialMLP rewrites).
+    try:
+        runtime_sd = model[0].sharded_state_dict(prefix=prefix, metadata=metadata)
+    except Exception as exc:
+        _restore_debug(f"repair_sharded_modelopt_state: sharded_state_dict() failed: {exc}")
+        return 0
+
+    # Identify invalid quantizer buffers and map global key -> runtime buffer.
+    key_to_runtime_buffer: dict[str, torch.Tensor] = {}
+    for k, v in runtime_sd.items():
+        if not isinstance(v, ShardedTensor):
+            continue
+        if not k.endswith(("._amax", "._global_amax")):
+            continue
+        # Optional: limit to keys whose owning module is a TensorQuantizer
+        # (already true for ._amax / ._global_amax in QuantModule subclasses).
+        runtime_buf = v.data
+        if _quantizer_buffer_value_is_invalid(runtime_buf):
+            key_to_runtime_buffer[k] = runtime_buf
+
+    if not key_to_runtime_buffer:
+        return 0
+
+    _restore_debug(
+        f"repair_sharded_modelopt_state: detected {len(key_to_runtime_buffer)} invalid "
+        f"quantizer buffer(s); re-loading directly from {ckpt_str}"
+    )
+
+    # Synthesize clean ShardedTensors with shape from saved metadata. This avoids
+    # whatever descriptor mismatch caused the original phase-2 load to drop these.
+    repair_sharded_sd: dict[str, ShardedTensor] = {}
+    skipped_missing: list[str] = []
+    for k in key_to_runtime_buffer:
+        meta = saved_md.get(k)
+        if meta is None:
+            skipped_missing.append(k)
+            continue
+        shape = tuple(meta.size)
+        dtype = (
+            meta.properties.dtype
+            if hasattr(meta, "properties") and meta.properties is not None
+            else key_to_runtime_buffer[k].dtype
+        )
+        placeholder = torch.zeros(shape, dtype=dtype)
+        repair_sharded_sd[k] = ShardedTensor.from_rank_offsets(k, placeholder, replica_id=(0, 0, 0))
+
+    if skipped_missing:
+        _restore_debug(
+            "repair_sharded_modelopt_state: "
+            f"{len(skipped_missing)} keys are missing from saved metadata; "
+            f"first 3: {skipped_missing[:3]}"
+        )
+
+    if not repair_sharded_sd:
+        return 0
+
+    loaded = dist_checkpointing.load(
+        repair_sharded_sd,
+        ckpt_str,
+        get_default_load_sharded_strategy(ckpt_str),
+    )
+
+    # Copy loaded values into the model's runtime buffers.
+    n_repaired = 0
+    for k, runtime_buf in key_to_runtime_buffer.items():
+        new_val = loaded.get(k)
+        if new_val is None:
+            continue
+        new_val = new_val.to(device=runtime_buf.device, dtype=runtime_buf.dtype)
+        if new_val.shape != runtime_buf.shape:
+            try:
+                new_val = new_val.view_as(runtime_buf)
+            except RuntimeError:
+                _restore_debug(
+                    f"repair_sharded_modelopt_state: shape mismatch on {k}: "
+                    f"loaded={tuple(new_val.shape)} runtime={tuple(runtime_buf.shape)}"
+                )
+                continue
+        with torch.no_grad():
+            runtime_buf.copy_(new_val)
+        n_repaired += 1
+
+    if n_repaired:
+        rank = (
+            torch.distributed.get_rank()
+            if torch.distributed.is_available() and torch.distributed.is_initialized()
+            else 0
+        )
+        print(
+            f"[modelopt][repair_sharded_modelopt_state rank {rank}] "
+            f"re-filled {n_repaired} quantizer buffer(s) from {ckpt_str} "
+            "(workaround for distcp phase-2 first-MoE-local-layer drop)",
+            flush=True,
+        )
+
+    return n_repaired
