@@ -79,6 +79,22 @@ def test_quant_recipe(quant_cfg, other_quant_cfg, is_less_than):
     assert qr_this_duplicate in {qr_this}
 
 
+def test_quant_recipe_custom_quantize_config_requires_name():
+    custom_cfg = mtq.QuantizeConfig(
+        quant_cfg=[
+            mtq.QuantizerCfgEntry(
+                quantizer_name="*weight_quantizer",
+                cfg=mtq.QuantizerAttributeConfig(num_bits=8, axis=None),
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="name must be provided"):
+        QuantRecipe(custom_cfg)
+
+    assert str(QuantRecipe(custom_cfg, name="custom_cfg")).startswith("custom_cfg(")
+
+
 def test_quant_recipe_hparam():
     model_test = torch.nn.Linear(4, 16)
     model_ref = torch.nn.Linear(4, 16)

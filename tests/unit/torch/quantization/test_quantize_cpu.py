@@ -407,6 +407,12 @@ class TestSetQuantizerAttributesFull:
         with pytest.raises(ValueError, match="Expected 2 attribute configs, but got 1"):
             quantizer.set_from_attribute_config([QuantizerAttributeConfig(num_bits=8)])
 
+    def test_sequential_quantizer_rejects_non_mapping_attribute_config(self):
+        """SequentialQuantizer rejects invalid scalar attribute configs at runtime."""
+        quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+        with pytest.raises(TypeError, match="attributes must be a list/tuple or a mapping"):
+            quantizer.set_from_attribute_config(object())  # type: ignore[arg-type]
+
 
 def test_ordering_later_entry_overrides_earlier():
     """Later entries in quant_cfg override earlier ones for the same quantizer."""

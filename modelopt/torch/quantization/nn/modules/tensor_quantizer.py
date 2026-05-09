@@ -18,7 +18,7 @@
 import contextlib
 import math
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 import torch
@@ -1425,11 +1425,17 @@ class SequentialQuantizer(nn.Sequential):
         return {"num_quantizers": len(self), "is_sequential_quantizer": True}
 
     def set_from_attribute_config(
-        self, attributes: list[QuantizerAttributeConfig] | list[Mapping[str, Any]]
+        self,
+        attributes: (
+            QuantizerAttributeConfig
+            | Mapping[str, Any]
+            | Sequence[QuantizerAttributeConfig | Mapping[str, Any]]
+        ),
     ):
-        """Set the attributes of contained quantizers from a list of attribute_dicts."""
+        """Set the attributes of contained quantizers from attribute configs."""
         if not isinstance(attributes, (list, tuple)):
-            assert isinstance(attributes, Mapping), "attributes must be a list or a mapping."
+            if not isinstance(attributes, Mapping):
+                raise TypeError("attributes must be a list/tuple or a mapping.")
             attributes = [attributes] * len(self)
         elif len(attributes) != len(self):
             raise ValueError(f"Expected {len(self)} attribute configs, but got {len(attributes)}.")

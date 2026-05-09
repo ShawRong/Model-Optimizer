@@ -127,14 +127,16 @@ class QuantRecipe(CustomHPType):
             if isinstance(quant_cfg, str):
                 assert hasattr(mtq_config, quant_cfg), f"Unknown quantization format {quant_cfg}"
                 quant_cfg = getattr(mtq_config, quant_cfg)
-            elif not isinstance(quant_cfg, QuantizeConfig):
-                assert name is not None, "name must be provided for custom quantization formats"
+            elif not isinstance(quant_cfg, QuantizeConfig) and name is None:
+                raise ValueError("name must be provided for custom quantization formats")
 
             self.config = (
                 quant_cfg.model_copy(deep=True)
                 if isinstance(quant_cfg, QuantizeConfig)
                 else mtq_config.QuantizeConfig.model_validate(quant_cfg)
             )
+            if name is None:
+                raise ValueError("name must be provided for custom quantization formats")
 
         # Disable KV Cache quantization
         # Currently KV Cache quantization is enabled for some quantization formats and disabled for others

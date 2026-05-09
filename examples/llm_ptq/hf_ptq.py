@@ -98,7 +98,9 @@ def _set_kv_cache_constant_amax(quant_cfg: list) -> None:
     for entry in quant_cfg:
         if entry.get("quantizer_name") != "*[kv]_bmm_quantizer":
             continue
-        cfg = entry.get("cfg") or {}
+        cfg = entry.get("cfg")
+        if cfg is None:
+            cfg = {}
         cfg["use_constant_amax"] = True
         entry["cfg"] = cfg
         break
