@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
+from typing import ClassVar
 
 from pydantic import field_validator, model_validator
 from typing_extensions import NotRequired, TypedDict
@@ -59,6 +60,19 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
     If a layer name matches ``"*output_layer*"``, the attributes will be replaced with ``{"enable": False}``.
     """
 
+    # Subclasses that declare ``recipe_type`` as a Pydantic field with a
+    # ``RecipeType`` default register themselves here. The loader uses this to
+    # dispatch from YAML's ``metadata.recipe_type`` to the right schema class
+    # without a hand-maintained table.
+    _by_type: ClassVar[dict[RecipeType, type[ModelOptRecipeBase]]] = {}
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs):
+        super().__pydantic_init_subclass__(**kwargs)
+        field = cls.model_fields.get("recipe_type")
+        if field is not None and isinstance(field.default, RecipeType):
+            ModelOptRecipeBase._by_type[field.default] = cls
+
     metadata: RecipeMetadataConfig = ModeloptField(
         default={"recipe_type": RecipeType.PTQ, "description": _DEFAULT_RECIPE_DESCRIPTION},
         title="Metadata",
@@ -90,6 +104,8 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
 
 class ModelOptPTQRecipe(ModelOptRecipeBase):
     """Our config class for PTQ recipes."""
+
+    recipe_type: RecipeType = RecipeType.PTQ
 
     quantize: QuantizeConfig = ModeloptField(
         default=QuantizeConfig(),

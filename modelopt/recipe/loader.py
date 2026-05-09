@@ -122,14 +122,6 @@ def _apply_dotlist(data: dict, overrides: list[str]) -> dict:
     return OmegaConf.to_container(merged, resolve=True)
 
 
-_RECIPE_SCHEMA_BY_TYPE = {
-    RecipeType.PTQ: ModelOptPTQRecipe,
-    RecipeType.SPECULATIVE_EAGLE: ModelOptEagleRecipe,
-    RecipeType.SPECULATIVE_DFLASH: ModelOptDFlashRecipe,
-    RecipeType.SPECULATIVE_MEDUSA: ModelOptMedusaRecipe,
-}
-
-
 def _peek_recipe_type(recipe_file: Path | Traversable) -> RecipeType | None:
     """Extract ``metadata.recipe_type`` from a recipe YAML without resolving $imports.
 
@@ -138,17 +130,10 @@ def _peek_recipe_type(recipe_file: Path | Traversable) -> RecipeType | None:
     """
     import yaml
 
-    text = recipe_file.read_text()
-    raw = yaml.safe_load(text)
-    if not isinstance(raw, dict):
-        return None
-    metadata = raw.get("metadata")
-    if not isinstance(metadata, dict):
-        return None
-    rtype = metadata.get("recipe_type")
     try:
-        return RecipeType(rtype)
-    except ValueError:
+        raw = yaml.safe_load(recipe_file.read_text())
+        return RecipeType(raw["metadata"]["recipe_type"])
+    except (TypeError, KeyError, ValueError):
         return None
 
 
@@ -162,7 +147,7 @@ def _load_recipe_from_file(
     plus the algorithm-specific section (``quantize`` / ``eagle`` / ``dflash`` / ``medusa``).
     """
     rtype = _peek_recipe_type(recipe_file)
-    schema_type = _RECIPE_SCHEMA_BY_TYPE.get(rtype) if rtype is not None else None
+    schema_type = ModelOptRecipeBase._by_type.get(rtype) if rtype is not None else None
     data = load_config(recipe_file, schema_type=schema_type)
     if not isinstance(data, dict):
         raise ValueError(
