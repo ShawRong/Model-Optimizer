@@ -319,9 +319,30 @@ def repair_sharded_modelopt_state(
     from megatron.core.dist_checkpointing.mapping import ShardedTensor
     from torch.distributed.checkpoint import FileSystemReader
 
+    rank = (
+        torch.distributed.get_rank()
+        if torch.distributed.is_available() and torch.distributed.is_initialized()
+        else 0
+    )
+    print(
+        f"[modelopt][repair_sharded_modelopt_state rank {rank}] enter "
+        f"checkpoint={checkpoint_name} prefix={prefix!r} model_len={len(model)}",
+        flush=True,
+    )
+
     if len(model) != 1:
+        print(
+            f"[modelopt][repair_sharded_modelopt_state rank {rank}] "
+            f"early-return: len(model)={len(model)} != 1",
+            flush=True,
+        )
         return 0
     if not mto.ModeloptStateManager.is_converted(model[0]):
+        print(
+            f"[modelopt][repair_sharded_modelopt_state rank {rank}] "
+            "early-return: model not modelopt-converted",
+            flush=True,
+        )
         return 0
 
     ckpt_str = str(checkpoint_name)
@@ -351,15 +372,26 @@ def repair_sharded_modelopt_state(
     # ``.metadata`` is keyed by the latter, so use ``v.key`` for both filter
     # and metadata lookup; otherwise we never match anything.
     sharded_key_to_runtime_buffer: dict[str, torch.Tensor] = {}
+    n_sharded_tensor = 0
+    n_amax_keys = 0
     for v in runtime_sd.values():
         if not isinstance(v, ShardedTensor):
             continue
+        n_sharded_tensor += 1
         sharded_key = v.key
         if not sharded_key.endswith(("._amax", "._global_amax")):
             continue
+        n_amax_keys += 1
         runtime_buf = v.data
         if _quantizer_buffer_value_is_invalid(runtime_buf):
             sharded_key_to_runtime_buffer[sharded_key] = runtime_buf
+
+    print(
+        f"[modelopt][repair_sharded_modelopt_state rank {rank}] "
+        f"runtime_sd_size={len(runtime_sd)} sharded_tensor_count={n_sharded_tensor} "
+        f"amax_keys={n_amax_keys} invalid={len(sharded_key_to_runtime_buffer)}",
+        flush=True,
+    )
 
     if not sharded_key_to_runtime_buffer:
         return 0
