@@ -221,9 +221,10 @@ class TestNVFP4StaticExportRoundTripBound:
 
 
 class TestNVFP4StaticVsDynamicEquivalence:
-    """When _amax = per_block_amax (no MSE shrink/expand), the static export
-    path and the dynamic export path must produce the same FP8 weight_scale
-    and the same dequantized result. Any divergence is a static-path bug."""
+    """When _amax = per_block_amax (no MSE shrink/expand), the static and
+    dynamic export paths must produce bit-identical FP8 weight_scale bytes.
+    Both paths apply the same lower clamp at the fp8 subnormal min (2**-9)
+    so tiny-amax blocks land on 0x01 instead of underflowing to 0x00."""
 
     def test_static_matches_dynamic_when_amax_is_block_max(self):
         weight = _layer1_routed_expert_like(16, 64, n_outliers=2, seed=2)

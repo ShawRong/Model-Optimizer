@@ -132,20 +132,21 @@ class NVFP4QTensor(BaseQuantizedTensor):
             expected_shape = (*weight.shape[:-1], num_blocks_per_row)
             per_block_scale = per_block_scale.view(expected_shape)
 
-            # Quantize scales to FP8. Saturate to the fp8_e4m3fn max (448) before the
-            # cast. Two scenarios produce a pre-cast value > 480 (which would round to
-            # NaN since fp8_e4m3fn has no Inf): (1) the [==0]=1.0 safety net above fires
-            # for an all-zero weight block when global_amax is small, giving
-            # ``1.0 * 448 / (global_amax/6)``; (2) MSE picks _amax > _global_amax. The
-            # in-place clamp keeps the stored byte finite. Do not clamp from below:
-            # underflow should round to FP8 byte 0 so this path matches the dynamic
-            # path. With a positive lower clamp, tiny-amax blocks would land on a
-            # subnormal FP8 byte and diverge from the dynamic export for the same
-            # global_amax.
+            # Quantize scales to FP8. Bound the pre-cast value to the representable
+            # fp8_e4m3fn finite range [2**-9, 448].
+            #   - Upper clamp avoids NaN when the pre-cast value exceeds 480 (which
+            #     happens when the [==0]=1.0 safety net above fires for an all-zero
+            #     weight block with small global_amax, or when MSE picks
+            #     _amax > _global_amax).
+            #   - Lower clamp at the fp8 subnormal min keeps tiny-amax blocks from
+            #     underflowing to fp8 byte 0x00. For MSE-calibrated weights we want
+            #     each block to use a representable nonzero scale so the MSE-selected
+            #     amax actually quantizes the weight; underflow to zero defeats that
+            #     optimization.
             if not keep_high_precision:
                 per_block_scale = (
                     (per_block_scale * 448.0 / per_block_scale_max)
-                    .clamp_(max=448.0)
+                    .clamp_(min=2**-9, max=448.0)
                     .to(torch.float8_e4m3fn)
                 )
             return per_block_scale, weights_scaling_factor_2
@@ -186,9 +187,13 @@ class NVFP4QTensor(BaseQuantizedTensor):
         )
         # Set all zero values in scale to 1.0
         per_block_scale[per_block_scale == 0] = 1.0
-        # Convert to torch.float8_e4m3fn
+        # Convert to torch.float8_e4m3fn. Clamp at the fp8_e4m3fn subnormal min (2**-9)
+        # so tiny-amax blocks land on byte 0x01 instead of underflowing to byte 0x00 —
+        # keeps bit-equivalence with the static export path (which applies the same
+        # clamp) and avoids dead blocks producing zero output even when weights are
+        # nontrivial.
         if not keep_high_precision:
-            per_block_scale = per_block_scale.to(torch.float8_e4m3fn)
+            per_block_scale = per_block_scale.clamp_(min=2**-9).to(torch.float8_e4m3fn)
         return per_block_scale, weights_scaling_factor_2
 
     @classmethod
