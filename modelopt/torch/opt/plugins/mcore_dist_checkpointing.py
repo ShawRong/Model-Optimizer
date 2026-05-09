@@ -342,24 +342,30 @@ def repair_sharded_modelopt_state(
         _restore_debug(f"repair_sharded_modelopt_state: sharded_state_dict() failed: {exc}")
         return 0
 
-    # Identify invalid quantizer buffers and map global key -> runtime buffer.
-    key_to_runtime_buffer: dict[str, torch.Tensor] = {}
-    for k, v in runtime_sd.items():
+    # Identify invalid quantizer buffers. NOTE: dict keys in
+    # ``model.sharded_state_dict()`` are the *runtime* names (e.g.
+    # ``...local_experts.{local_idx}.linear_fc1.weight_quantizer._amax``), but
+    # ``ShardedTensor.key`` is the *saved* / sharded name after
+    # ``replace_prefix_for_sharding`` rewrites
+    # ``local_experts.{local}`` -> ``experts.{global}``. The saved checkpoint
+    # ``.metadata`` is keyed by the latter, so use ``v.key`` for both filter
+    # and metadata lookup; otherwise we never match anything.
+    sharded_key_to_runtime_buffer: dict[str, torch.Tensor] = {}
+    for v in runtime_sd.values():
         if not isinstance(v, ShardedTensor):
             continue
-        if not k.endswith(("._amax", "._global_amax")):
+        sharded_key = v.key
+        if not sharded_key.endswith(("._amax", "._global_amax")):
             continue
-        # Optional: limit to keys whose owning module is a TensorQuantizer
-        # (already true for ._amax / ._global_amax in QuantModule subclasses).
         runtime_buf = v.data
         if _quantizer_buffer_value_is_invalid(runtime_buf):
-            key_to_runtime_buffer[k] = runtime_buf
+            sharded_key_to_runtime_buffer[sharded_key] = runtime_buf
 
-    if not key_to_runtime_buffer:
+    if not sharded_key_to_runtime_buffer:
         return 0
 
     _restore_debug(
-        f"repair_sharded_modelopt_state: detected {len(key_to_runtime_buffer)} invalid "
+        f"repair_sharded_modelopt_state: detected {len(sharded_key_to_runtime_buffer)} invalid "
         f"quantizer buffer(s); re-loading directly from {ckpt_str}"
     )
 
@@ -367,19 +373,21 @@ def repair_sharded_modelopt_state(
     # whatever descriptor mismatch caused the original phase-2 load to drop these.
     repair_sharded_sd: dict[str, ShardedTensor] = {}
     skipped_missing: list[str] = []
-    for k in key_to_runtime_buffer:
-        meta = saved_md.get(k)
+    for sharded_key in sharded_key_to_runtime_buffer:
+        meta = saved_md.get(sharded_key)
         if meta is None:
-            skipped_missing.append(k)
+            skipped_missing.append(sharded_key)
             continue
         shape = tuple(meta.size)
         dtype = (
             meta.properties.dtype
             if hasattr(meta, "properties") and meta.properties is not None
-            else key_to_runtime_buffer[k].dtype
+            else sharded_key_to_runtime_buffer[sharded_key].dtype
         )
         placeholder = torch.zeros(shape, dtype=dtype)
-        repair_sharded_sd[k] = ShardedTensor.from_rank_offsets(k, placeholder, replica_id=(0, 0, 0))
+        repair_sharded_sd[sharded_key] = ShardedTensor.from_rank_offsets(
+            sharded_key, placeholder, replica_id=(0, 0, 0)
+        )
 
     if skipped_missing:
         _restore_debug(
@@ -399,8 +407,8 @@ def repair_sharded_modelopt_state(
 
     # Copy loaded values into the model's runtime buffers.
     n_repaired = 0
-    for k, runtime_buf in key_to_runtime_buffer.items():
-        new_val = loaded.get(k)
+    for sharded_key, runtime_buf in sharded_key_to_runtime_buffer.items():
+        new_val = loaded.get(sharded_key)
         if new_val is None:
             continue
         new_val = new_val.to(device=runtime_buf.device, dtype=runtime_buf.dtype)
@@ -409,7 +417,7 @@ def repair_sharded_modelopt_state(
                 new_val = new_val.view_as(runtime_buf)
             except RuntimeError:
                 _restore_debug(
-                    f"repair_sharded_modelopt_state: shape mismatch on {k}: "
+                    f"repair_sharded_modelopt_state: shape mismatch on {sharded_key}: "
                     f"loaded={tuple(new_val.shape)} runtime={tuple(runtime_buf.shape)}"
                 )
                 continue
