@@ -1587,7 +1587,7 @@ MAMBA_MOE_NVFP4_AGGRESSIVE_MSE_CFG = {
         *_default_disabled_quantizer_cfg,
         *_mamba_moe_disabled_quantizer_cfg,
     ],
-    "algorithm": {"method": "mse", "fp8_scale_sweep": False},
+    "algorithm": {"method": "mse", "fp8_scale_sweep": True},
 }
 MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
     "quant_cfg": [
