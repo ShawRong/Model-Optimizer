@@ -1,4 +1,4 @@
-# Base config for DFlash training. Override fields via OmegaConf dotlist on the CLI.
+# DFlash speculative-decoding training recipe. Override fields via OmegaConf dotlist on the CLI.
 
 # maps to ModelArguments (main.py)
 model:
