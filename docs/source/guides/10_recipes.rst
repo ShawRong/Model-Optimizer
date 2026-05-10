@@ -46,6 +46,9 @@ layers:
 3. **Recipe loader** -- :func:`~modelopt.recipe.load_recipe` validates the loaded
    configuration against Pydantic models and returns a typed recipe object ready for use.
 
+For the lower-level schema, validation, import-resolution, and persistence model
+behind recipes, see :ref:`modelopt-config-system`.
+
 
 Recipe format
 =============
@@ -578,8 +581,8 @@ for loading shared configuration fragments:
 Path resolution
 ===============
 
-Both :func:`~modelopt.recipe.load_recipe` and :func:`~modelopt.recipe.load_config`
-resolve paths using the same strategy:
+:func:`~modelopt.recipe.load_recipe` resolves recipe paths with recipe-library
+semantics:
 
 1. If the path is absolute, use it directly.
 2. If relative, check the **built-in recipes library** first
@@ -594,6 +597,11 @@ This means built-in recipes can be referenced without any prefix:
    # These are all equivalent:
    load_recipe("general/ptq/fp8_default-kv_fp8_cast")
    load_recipe("general/ptq/fp8_default-kv_fp8_cast.yaml")
+
+:func:`~modelopt.recipe.load_config` is lower level and resolves config/snippet
+files by checking the filesystem first, then ``modelopt_recipes/``. That order
+lets users override built-in reusable snippets with local files when loading
+standalone configs.
 
 
 Writing a custom recipe
