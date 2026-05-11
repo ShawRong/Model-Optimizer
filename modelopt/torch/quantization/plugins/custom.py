@@ -205,8 +205,7 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
             _check_unsupported_states(
                 quantizer if isinstance(quantizer, TensorQuantizer) else quantizer[0]
             )
-        # Static NVFP4 weight _amax is saved calibration state. Preserve it when it
-        # matches the local shard; recalibrating would replace MSE scales with max scales.
+        # Skip max_calibrate when saved static NVFP4 state is intact; else MSE scales get overwritten.
         static_nvfp4_details = _static_nvfp4_weight_state_details(
             self.weight_quantizer, self.weight
         )
