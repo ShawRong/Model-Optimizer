@@ -287,16 +287,14 @@ def _ensure_weight_quantizer_calibrated(
         module_name: Optional module name for better warning messages
     """
     if isinstance(weight_quantizer, NVFP4StaticQuantizer):
-        # `_amax` and `_global_amax` are registered as buffers via
-        # `register_buffer(..., torch.empty(...))` during MCore restore, so a
-        # buffer can be present-and-non-None yet contain uninitialized memory
-        # if the corresponding distcp shard didn't fill it (observed for
-        # routed experts that did not receive any tokens during calibration:
-        # the resulting per-block buffer carried valid-but-absurd negative
-        # FP32 values like -1e37, which propagate through static export to
-        # produce bogus FP8 weight_scale bytes and NaN logits at serving
-        # time). Treat any non-finite or negative entry as "needs recompute".
+
         def _amax_is_invalid(t: torch.Tensor | None) -> bool:
+            """True if the amax buffer is missing or holds uninitialized memory.
+
+            MCore distcp can register `_amax` / `_global_amax` buffers without filling
+            them (e.g., routed experts that received no calibration tokens), leaving
+            non-finite or absurd negative FP32 values that would corrupt export.
+            """
             if t is None:
                 return True
             t = t.detach()

@@ -15,7 +15,6 @@
 
 """Custom plugin base modules and utilities for quantization."""
 
-import os
 import warnings
 from collections.abc import Callable, Iterator
 from functools import partial
@@ -153,51 +152,6 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
             expected_blocks = weight.numel() // block_size
             return amax.numel() == expected_blocks and global_amax.numel() == 1
 
-        def _rank_for_restore_log():
-            if torch.distributed.is_available() and torch.distributed.is_initialized():
-                return torch.distributed.get_rank()
-            return int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
-
-        def _static_nvfp4_weight_state_details(quantizer, weight):
-            quantizer = quantizer[0] if isinstance(quantizer, SequentialQuantizer) else quantizer
-            if not isinstance(quantizer, NVFP4StaticQuantizer):
-                return None
-            amax = getattr(quantizer, "_amax", None)
-            global_amax = getattr(quantizer, "global_amax", None)
-            block_sizes = getattr(quantizer, "block_sizes", None)
-            block_size = block_sizes.get(-1) if isinstance(block_sizes, dict) else None
-            expected_blocks = (
-                weight.numel() // block_size
-                if block_size and weight.shape[-1] % block_size == 0
-                else None
-            )
-            return {
-                "block_size": block_size,
-                "amax_numel": None if amax is None else amax.numel(),
-                "expected_blocks": expected_blocks,
-                "global_amax_numel": None if global_amax is None else global_amax.numel(),
-                "weight_shape": tuple(weight.shape),
-            }
-
-        def _log_static_nvfp4_restore_decision(action, details, *, always=False):
-            if details is None:
-                return
-            rank = _rank_for_restore_log()
-            count = getattr(_ParallelLinear.modelopt_post_restore, "_static_nvfp4_log_count", 0)
-            if not always and count >= int(
-                os.environ.get("MODELOPT_STATIC_NVFP4_RESTORE_LOG_LIMIT", "8")
-            ):
-                return
-            _ParallelLinear.modelopt_post_restore._static_nvfp4_log_count = count + 1
-            print(
-                "[ModelOpt][static-nvfp4-restore] "
-                f"rank={rank} prefix={prefix} action={action} "
-                f"weight_shape={details['weight_shape']} block_size={details['block_size']} "
-                f"amax_numel={details['amax_numel']} expected_blocks={details['expected_blocks']} "
-                f"global_amax_numel={details['global_amax_numel']}",
-                flush=True,
-            )
-
         if self.weight is None:
             return
 
@@ -206,26 +160,9 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
                 quantizer if isinstance(quantizer, TensorQuantizer) else quantizer[0]
             )
         # Skip max_calibrate when saved static NVFP4 state is intact; else MSE scales get overwritten.
-        static_nvfp4_details = _static_nvfp4_weight_state_details(
-            self.weight_quantizer, self.weight
-        )
-        has_complete_static_nvfp4_weight_state = _has_complete_static_nvfp4_weight_state(
-            self.weight_quantizer, self.weight
-        )
-        if static_nvfp4_details is not None and has_complete_static_nvfp4_weight_state:
-            _log_static_nvfp4_restore_decision("skip_weight_max_calibrate", static_nvfp4_details)
-        if (
-            _has_state(self.weight_quantizer, "_amax")
-            and not has_complete_static_nvfp4_weight_state
-        ):
-            if static_nvfp4_details is not None:
-                _log_static_nvfp4_restore_decision(
-                    "run_weight_max_calibrate", static_nvfp4_details, always=True
-                )
-                warnings.warn(
-                    f"Static NVFP4 weight quantizer for {prefix} has incomplete restore state; "
-                    "running max_calibrate on weight_quantizer."
-                )
+        if _has_state(
+            self.weight_quantizer, "_amax"
+        ) and not _has_complete_static_nvfp4_weight_state(self.weight_quantizer, self.weight):
             self.weight_quantizer.reset_amax()
             max_calibrate(self.weight_quantizer, lambda wq: wq(self.weight), distributed_sync=False)
         if _has_state(self.input_quantizer, "_pre_quant_scale"):
