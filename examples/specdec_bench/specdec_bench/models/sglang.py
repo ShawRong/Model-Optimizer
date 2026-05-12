@@ -80,7 +80,7 @@ class SGLANGModel(Model):
                 engine_kwargs["speculative_num_steps"] = kwargs.get("speculative_num_steps", 3)
                 engine_kwargs["speculative_eagle_topk"] = kwargs.get("speculative_eagle_topk", 1)
 
-        # mamba_scheduler_strategy: extra_buffer needed for qwen3.5
+        # extra engine arg needed for qwen3.5
         if "mamba_scheduler_strategy" in kwargs:
             engine_kwargs["mamba_scheduler_strategy"] = kwargs["mamba_scheduler_strategy"]
 
