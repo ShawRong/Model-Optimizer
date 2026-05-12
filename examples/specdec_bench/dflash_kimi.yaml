@@ -1,4 +1,0 @@
-chat_template_args:
-  thinking: true
-engine_args:
-  speculative_dflash_draft_window_size: 4096

@@ -67,6 +67,10 @@ class SGLANGModel(Model):
             engine_kwargs["speculative_draft_model_path"] = kwargs.get("draft_model_dir")
             if speculative_algorithm == "DFLASH":
                 engine_kwargs["speculative_num_draft_tokens"] = kwargs.get("speculative_num_draft_tokens", 8)
+                if "speculative_dflash_draft_window_size" in kwargs:
+                    engine_kwargs["speculative_dflash_draft_window_size"] = kwargs[
+                        "speculative_dflash_draft_window_size"
+                    ]
                 print(
                     f"[specdec_bench] DFLASH ignores --draft_length / speculative_num_steps / "
                     f"speculative_eagle_topk; effective draft block = "
@@ -77,25 +81,9 @@ class SGLANGModel(Model):
                 engine_kwargs["speculative_num_steps"] = kwargs.get("speculative_num_steps", 3)
                 engine_kwargs["speculative_eagle_topk"] = kwargs.get("speculative_eagle_topk", 1)
 
-        # Forward any other kwargs (e.g. from runtime_params.engine_args) to
-        # sgl.Engine, letting yaml override the defaults set above. Skip only
-        # specdec_bench-internal routing keys that should never reach SGLang.
-        _internal_keys = frozenset({
-            "speculative_algorithm",
-            "draft_model_dir",
-            "speculative_num_steps",
-            "speculative_eagle_topk",
-            "speculative_num_draft_tokens",
-            "speculative_dflash_draft_window_size",
-            "tensor_parallel_size",
-            "moe_expert_parallel_size",
-            "tokenizer_path",
-            "use_draft_logits",
-        })
-        for _k, _v in kwargs.items():
-            if _k in _internal_keys:
-                continue
-            engine_kwargs[_k] = _v
+        # mamba_scheduler_strategy: extra_buffer needed for qwen3.5
+        if "mamba_scheduler_strategy" in kwargs:
+            engine_kwargs["mamba_scheduler_strategy"] = kwargs["mamba_scheduler_strategy"]
 
         self.model = sgl.Engine(**engine_kwargs)
 
