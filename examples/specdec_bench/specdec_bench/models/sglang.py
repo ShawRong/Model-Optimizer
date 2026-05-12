@@ -60,6 +60,7 @@ class SGLANGModel(Model):
             enable_torch_compile=kwargs.get("enable_torch_compile", False),
             cuda_graph_max_bs=max_concurrent_requests,
             disable_cuda_graph=False,
+            disable_cuda_graph_padding=True,
         )
         if speculative_algorithm is not None:
             # https://github.com/sgl-project/sglang/pull/3582
