@@ -41,8 +41,6 @@ class SGLANGModel(Model):
             speculative_algorithm = "STANDALONE"
         elif speculative_algorithm == "NGRAM":
             speculative_algorithm = "LOOKAHEAD"
-        elif speculative_algorithm == "DFLASH":
-            pass  # SGLang native name, pass through
         elif speculative_algorithm == "NONE":
             speculative_algorithm = None
 
