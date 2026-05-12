@@ -64,20 +64,16 @@ class SGLANGModel(Model):
         if speculative_algorithm is not None:
             # https://github.com/sgl-project/sglang/pull/3582
             engine_kwargs["speculative_algorithm"] = speculative_algorithm
-            num_draft_tokens = kwargs.get("speculative_num_draft_tokens", 4)
-            engine_kwargs["speculative_num_draft_tokens"] = num_draft_tokens
             engine_kwargs["speculative_draft_model_path"] = kwargs.get("draft_model_dir")
             if speculative_algorithm == "DFLASH":
-                if "speculative_dflash_draft_window_size" in kwargs:
-                    engine_kwargs["speculative_dflash_draft_window_size"] = kwargs[
-                        "speculative_dflash_draft_window_size"
-                    ]
+                engine_kwargs["speculative_num_draft_tokens"] = kwargs.get("speculative_num_draft_tokens", 8)
                 print(
                     f"[specdec_bench] DFLASH ignores --draft_length / speculative_num_steps / "
                     f"speculative_eagle_topk; effective draft block = "
-                    f"speculative_num_draft_tokens={num_draft_tokens}"
+                    f"speculative_num_draft_tokens={engine_kwargs['speculative_num_draft_tokens']}"
                 )
             else:
+                engine_kwargs["speculative_num_draft_tokens"] = kwargs.get("speculative_num_draft_tokens", 4)
                 engine_kwargs["speculative_num_steps"] = kwargs.get("speculative_num_steps", 3)
                 engine_kwargs["speculative_eagle_topk"] = kwargs.get("speculative_eagle_topk", 1)
 
