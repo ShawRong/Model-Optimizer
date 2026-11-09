@@ -103,6 +103,7 @@ repos:
         exclude: >
           (?x)^(
               modelopt/torch/quantization/residue.py|
+              modelopt/torch/export/residue_export.py|
               modelopt/torch/quantization/nn/modules/residue_linear.py|
               modelopt/torch/quantization/nn/modules/residue_tensor_quantizer.py|
               modelopt/torch/quantization/utils/calib_utils.py|

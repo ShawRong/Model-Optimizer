@@ -325,8 +325,8 @@ def _resolve_quantized_weight_export_inputs(
 ):
     if isinstance(module, ResidueQuantLinear):
         raise NotImplementedError(
-            "Residue deployment export is not supported. Use modelopt.torch.opt.save "
-            "for a checkpoint that preserves residue QDQ."
+            "Residue weights require layout metadata. Use export_hf_checkpoint() "
+            "to export weights and residue metadata together."
         )
     weight = getattr(module, weight_name)
     if isinstance(weight, QTensorWrapper):

@@ -133,6 +133,7 @@ from .quant_utils import (
     to_quantized_weight,
 )
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
+from .residue_export import collect_residue_export_metadata, export_residue_weight
 
 __all__ = ["export_hf_checkpoint", "export_speculative_decoding"]
 
@@ -619,6 +620,17 @@ def _export_quantized_weight(
     pack time only ever made the packed tensors share an address for the address-based
     drop; the name-based drop needs no such aliasing.
     """
+    if isinstance(sub_module, ResidueQuantLinear):
+        if weight_name != "weight":
+            raise NotImplementedError("Residue export requires a standard Linear weight.")
+        tensors = export_residue_weight(sub_module, dtype)
+        sub_module.weight = nn.Parameter(tensors.pop("weight"), requires_grad=False)
+        for quantizer in (sub_module.input_quantizer, sub_module.weight_quantizer):
+            quantizer._non_persistent_buffers_set.add("_salient_indices")
+        for name, value in tensors.items():
+            sub_module.register_buffer(name, value)
+        return
+
     quantization_format = get_quantization_format(sub_module)
     if quantization_format == QUANTIZATION_NONE:
         return
@@ -978,21 +990,21 @@ def _process_quantized_modules(
 
 
 def _check_residue_export(model, components=None):
-    """Reject residue layers before export changes weights or writes files."""
+    """Validate residue deployment before export changes weights or writes files."""
     if isinstance(model, nn.Module):
-        modules = [model]
+        return collect_residue_export_metadata(model)
     elif HAS_DIFFUSERS and is_diffusers_object(model):
         modules = get_diffusion_components(model, components).values()
     else:
-        return
+        return {}
     for module in modules:
         if isinstance(module, nn.Module) and any(
             isinstance(child, ResidueQuantLinear) for child in module.modules()
         ):
             raise NotImplementedError(
-                "Residue deployment export is not supported. Use modelopt.torch.opt.save "
-                "for a checkpoint that preserves residue QDQ."
+                "Residue deployment export currently requires a Hugging Face Transformers model."
             )
+    return {}
 
 
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
@@ -1899,6 +1911,9 @@ def export_hf_checkpoint(
     This function automatically detects whether the model is from transformers
     or diffusers and applies the appropriate export logic.
 
+    Residue Linear layers additionally write ``residue_kernel_metadata.json`` for
+    a residue-aware runtime, using extended weights or a single weight for full-channel residue.
+
     Under ``torch.distributed`` (e.g. FSDP2), all ranks participate in the
     collective state-dict gather inside ``_export_transformers_checkpoint``;
     only rank 0 writes files. A final barrier syncs the other ranks.
@@ -1919,7 +1934,11 @@ def export_hf_checkpoint(
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys.
     """
-    _check_residue_export(model, components)
+    residue_metadata = _check_residue_export(model, components)
+    if residue_metadata and save_modelopt_state:
+        raise ValueError("Save a residue ModelOpt checkpoint separately before deployment export.")
+    if residue_metadata and Path(export_dir).exists() and any(Path(export_dir).iterdir()):
+        raise FileExistsError(f"Refusing to overwrite residue export: {export_dir}")
     # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
     # source so the exported checkpoint is the complete model. Merged here, ahead of the path
     # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict
@@ -2068,8 +2087,21 @@ def export_hf_checkpoint(
                             if key.endswith(".weight")
                         ),
                     )
+                mapped_residue_metadata = residue_metadata
+                if residue_metadata and name_mapper is not None:
+                    mapped_residue_metadata = {
+                        section: {name_mapper(name): value for name, value in entries.items()}
+                        for section, entries in residue_metadata.items()
+                    }
+                if residue_metadata:
+                    mapped_layers = mapped_residue_metadata["layers"]
+                    if len(mapped_layers) != len(residue_metadata["layers"]) or any(
+                        f"{name}.weight" not in mapped_state_dict for name in mapped_layers
+                    ):
+                        raise ValueError("Residue metadata cannot follow this weight conversion.")
                 export_state_dict = mapped_state_dict
                 hf_quant_config = mapped_quant_config
+                residue_metadata = mapped_residue_metadata
             except Exception as exc:
                 warnings.warn(
                     f"Quant-aware reverse weight conversion skipped ({exc}); all exported "
@@ -2097,6 +2129,10 @@ def export_hf_checkpoint(
 
         if rank == 0:
             _write_hf_export_config(model, hf_quant_config, export_dir)
+            if residue_metadata:
+                (export_dir / "residue_kernel_metadata.json").write_text(
+                    json.dumps(residue_metadata, indent=2) + "\n", encoding="utf-8"
+                )
             copy_off_index_safetensors(_source_checkpoint(model), export_dir)
             if not (_offloaded or is_fsdp2_sharded):
                 # The streaming paths already did, from save_non_weight_artifacts.

@@ -25,10 +25,7 @@ from pydantic import ValidationError
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.unified_export_hf import (
-    _export_transformers_checkpoint,
-    export_hf_checkpoint,
-)
+from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.quantization.nn import ResidueQuantLinear
 
 
@@ -167,29 +164,6 @@ def test_fold_and_compress_rejected_without_mutation():
         mtq.fold_weight(model)
     with pytest.raises(AssertionError, match="Cannot add"):
         mtq.compress(model)
-    for key, value in before.items():
-        assert torch.equal(model.state_dict()[key], value), key
-
-
-@pytest.mark.parametrize("fmt", ["NVFP4", "MXFP4"])
-@pytest.mark.parametrize("materialized", [False, True])
-@pytest.mark.parametrize("exporter", [export_hf_checkpoint, _export_transformers_checkpoint])
-def test_deployment_export_rejected_without_mutation(tmp_path, fmt, materialized, exporter):
-    model = mtq.quantize(
-        nn.Sequential(nn.Linear(64, 8)), _config(fmt), lambda m: m(torch.ones(2, 64))
-    )
-    if materialized:
-        model[0].materialize_residue_weight()
-    before = deepcopy(model.state_dict())
-    attributes = set(model.__dict__)
-    parameter = model[0].weight
-    export_dir = tmp_path / "export"
-    with pytest.raises(NotImplementedError, match=r"Residue.*export"):
-        exporter(model, dtype=torch.float32, export_dir=export_dir)
-    assert not export_dir.exists()
-    assert set(model.__dict__) == attributes
-    assert model[0].weight is parameter
-    assert model.state_dict().keys() == before.keys()
     for key, value in before.items():
         assert torch.equal(model.state_dict()[key], value), key
 
