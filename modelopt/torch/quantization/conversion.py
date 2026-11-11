@@ -39,13 +39,14 @@ from .config import (
 from .nn import (
     QuantModule,
     QuantModuleRegistry,
+    ResidueQuantLinear,
     SequentialQuantizer,
     StaticBlockScaleQuantizer,
     SVDQuantLinear,
     TensorQuantizer,
 )
 from .utils import is_quantized, is_quantized_linear
-from .utils.shared_input import SharedWeightGlobalAmaxState
+from .utils.shared_input import DOWN_PROJ_PATTERNS, SharedWeightGlobalAmaxState
 
 __all__ = [
     "preserve_quantizer_attributes_context",
@@ -115,11 +116,17 @@ def _restore_shared_quant_state_aliases(
     """Rebuild shared-state ties before checkpoint tensor values are loaded."""
     if not metadata.get("shared_quant_states"):
         return
-    # max / mse / local_hessian all carry ``shared_states`` (via _SharedStatesConfig) and use
-    # the same grouping; resolve the patterns that were in effect at save and rebuild the ties.
-    patterns = SharedWeightGlobalAmaxState.resolve_patterns(
-        shared_states=getattr(config, "shared_states", None)
-    )
+    patterns = metadata.get("shared_quant_patterns")
+    if patterns is None:
+        # Saved before the patterns were recorded, when the MLA down projections were not grouped:
+        # tying them now would load both members' ranges into one buffer.
+        patterns = [
+            pattern
+            for pattern in SharedWeightGlobalAmaxState.resolve_patterns(
+                shared_states=getattr(config, "shared_states", None)
+            )
+            if pattern not in DOWN_PROJ_PATTERNS
+        ]
     SharedWeightGlobalAmaxState.restore(model, patterns=patterns)
 
 
@@ -177,6 +184,46 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
     return model
 
 
+ResidueQuantModuleRegistry = _DMRegistryCls("ResidueQuant")
+
+
+def create_and_replace_residue_linear_on_the_fly(model, names):
+    """Promote selected linears using the same dynamic-module mechanism as SVDQuant."""
+    for name in names:
+        module = model.get_submodule(name)
+        if isinstance(module, ResidueQuantLinear):
+            continue
+        if type(module) not in ResidueQuantModuleRegistry:
+            ResidueQuantModuleRegistry.register({type(module): type(module).__name__})(
+                ResidueQuantLinear
+            )
+        # Convert directly to include a root Linear.
+        ResidueQuantModuleRegistry.convert(module)
+
+
+def update_residue_metadata(model, config, metadata):
+    """Record residue module names; native quantizer state carries the indices."""
+    update_quantize_metadata(model, config, metadata)
+    metadata["residue_modules"] = {
+        name: {"shared_input_group": getattr(module, "_residue_group", ())}
+        for name, module in model.named_modules()
+        if isinstance(module, ResidueQuantLinear)
+    }
+
+
+def restore_residue_model(model, config, metadata):
+    """Restore residue linears with their original weight dimensions."""
+    states = metadata["residue_modules"]
+    if any(state.get("original_in_features") is not None for state in states.values()):
+        raise NotImplementedError(
+            "Materialized residue checkpoints are unsupported; use an unextended QDQ checkpoint."
+        )
+    create_and_replace_residue_linear_on_the_fly(model, states)
+    for name, state in states.items():
+        model.get_submodule(name)._residue_group = tuple(state.get("shared_input_group", ()))
+    return restore_quantizer_state(model, config, metadata)
+
+
 SVDQuantModuleRegistry = _DMRegistryCls("SVDQuant")
 
 
@@ -206,8 +253,12 @@ def update_quantize_metadata(
     metadata["quantizer_state"] = quantizer_state(model)
     if shared_state_metadata := SharedWeightGlobalAmaxState.metadata(model):
         metadata["shared_quant_states"] = shared_state_metadata
+        # Record the patterns calibration grouped with, so restore ties the same groups; ``config``
+        # need not be the calibration algorithm's (e.g. LoRA and AutoQuantize pass a default one).
+        metadata["shared_quant_patterns"] = SharedWeightGlobalAmaxState.grouping_patterns(model)
     else:
         metadata.pop("shared_quant_states", None)
+        metadata.pop("shared_quant_patterns", None)
 
 
 def _linear_attention_modules(model):
