@@ -23,6 +23,7 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file
 from transformers import LlamaConfig, LlamaForCausalLM
+from transformers.core_model_loading import Concatenate, WeightConverter, WeightRenaming
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -154,8 +155,6 @@ def test_residue_hf_export_roundtrip(tmp_path, fmt, ratio, conversion):
             references[name] = inputs, expected
     assert references
     if conversion in ("split", "rename"):
-        from transformers.core_model_loading import Concatenate, WeightConverter, WeightRenaming
-
         if conversion == "split":
             model._weight_conversions = [
                 WeightConverter(
